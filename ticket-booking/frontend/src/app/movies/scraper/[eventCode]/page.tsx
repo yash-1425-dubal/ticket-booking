@@ -464,8 +464,8 @@ export default function ScraperMovieDetailPage() {
   const title = movie?.event_name || movie?.title || '';
   const posterUrl = movie?.banner_image_url || movie?.poster_url || '';
   const dimensions = movie?.event_dimension ? movie.event_dimension.split(',').map((d: string) => d.trim()) : [];
-  const languages = movie?.event_language || [];
-  const genres = movie?.event_genre ? movie.event_genre.split('|') : [];
+  const languages: string[] = movie?.event_language || [];
+  const genres: string[] = movie?.event_genre ? movie.event_genre.split('|') : [];
   const rating = movie?.aggregated_rating;
   const multiplier = getPriceMultiplier();
 
