@@ -1,0 +1,15 @@
+node_modules/
+.next/
+.env
+.env.local
+*.log
+
+# Old reference projects
+EventPulse-main/
+Movie-Ticket-Booking-System-master/
+cinema-plus-master/
+redis-ticket-booking-main/
+
+# Claude & IDE configs
+.claude/
+.vscode/

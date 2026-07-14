@@ -28,6 +28,8 @@ interface SeatMapData {
   event: any;
   totalSeats: number;
   availableSeats: number;
+  heldSeats: number;
+  bookedSeats: number;
   rows: Seat[][];
 }
 
