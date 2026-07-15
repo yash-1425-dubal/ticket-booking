@@ -4,6 +4,7 @@ const env = require('../../config/env');
 const ApiError = require('../../utils/ApiError');
 const { acquireLock, releaseLock } = require('../../utils/redisLock');
 const { v4: uuidv4 } = require('uuid');
+const { generateQrImage } = require('../qr/qr.service');
 
 async function createBooking(eventId, seatIds, userId, idempotencyKey) {
   if (!seatIds || seatIds.length === 0) {
@@ -17,9 +18,10 @@ async function createBooking(eventId, seatIds, userId, idempotencyKey) {
     throw ApiError.tooMany('Please wait, another booking is in progress');
   }
 
+  let booking;
   try {
     // Use a Prisma transaction for atomicity
-    const booking = await prisma.$transaction(async (tx) => {
+    booking = await prisma.$transaction(async (tx) => {
       // Verify all seats are held by this user and still valid
       const seats = await tx.seat.findMany({
         where: {
@@ -61,170 +63,183 @@ async function createBooking(eventId, seatIds, userId, idempotencyKey) {
         }
       }
 
-    // Create booking with seats
-    const newBooking = await tx.booking.create({
-      data: {
-        userId,
-        eventId,
-        status: 'CONFIRMED',
-        totalAmount,
-        idempotencyKey,
-        bookingSeats: {
-          create: seats.map((s) => ({
-            seatId: s.id,
-            price: s.price,
-          })),
-        },
-        payment: {
-          create: {
-            amount: totalAmount,
-            method: 'CARD',
-            status: 'PAID',
+      // Create booking with seats
+      const newBooking = await tx.booking.create({
+        data: {
+          userId,
+          eventId,
+          status: 'CONFIRMED',
+          totalAmount,
+          idempotencyKey,
+          bookingSeats: {
+            create: seats.map((s) => ({
+              seatId: s.id,
+              price: s.price,
+            })),
+          },
+          payment: {
+            create: {
+              amount: totalAmount,
+              method: 'CARD',
+              status: 'PAID',
+            },
           },
         },
-      },
-      include: {
-        bookingSeats: {
-          include: { seat: true },
-        },
-        event: {
-          include: {
-            movie: { include: { venue: true } },
+        include: {
+          bookingSeats: {
+            include: { seat: true },
           },
+          event: {
+            include: {
+              movie: { include: { venue: true } },
+            },
+          },
+          payment: true,
         },
-        payment: true,
-      },
-    });
-
-    return newBooking;
-  });
-
-  // Clear Redis hold keys
-  if (redis.isAvailable) {
-    for (const seatId of seatIds) {
-      await redis.del(`seat:hold:${seatId}`);
-    }
-  }
-
-  // Broadcast seat booked
-  try {
-    const { getSocketServer } = require('../../sockets');
-    const io = getSocketServer();
-    if (io) {
-      io.to(`event:${eventId}`).emit('seatBooked', {
-        eventId,
-        seatIds,
-        userId,
       });
-    }
-  } catch {}
 
-  // Create notification for the user
-  try {
-    const seatList = booking.bookingSeats.map(bs => bs.seat.seatNumber).join(', ');
-    await prisma.notification.create({
-      data: {
-        userId,
-        type: 'BOOKING_CONFIRMED',
-        title: 'Booking Confirmed',
-        message: `Your booking for ${booking.event?.movie?.title || 'Event'} (${seatList}) is confirmed. Total: ₹${Number(booking.totalAmount).toLocaleString('en-IN')}`,
-      },
+      return newBooking;
     });
-    const { getSocketServer } = require('../../sockets');
-    const io = getSocketServer();
-    if (io) {
-      io.to(`user:${userId}`).emit('notification', {
-        type: 'BOOKING_CONFIRMED',
-        title: 'Booking Confirmed',
-        message: `Your booking is confirmed. Total: ₹${Number(booking.totalAmount).toLocaleString('en-IN')}`,
-      });
-    }
-  } catch {}
-
-  // Send booking confirmation email (via queue if Redis available, fallback to direct send)
-  try {
-    const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true, name: true } });
-    const seatList = booking.bookingSeats.map(bs => bs.seat.seatNumber).join(', ');
-    const eventTitle = booking.event?.movie?.title || 'Event';
-    const venueName = booking.event?.movie?.venue?.name || '';
-
-    // Generate QR image buffer for email embedding
-    let qrAttachments = [];
-    let qrImgHtml = '';
-    try {
-      const QRCode = require('qrcode');
-      const verifyUrl = `${env.FRONTEND_URL}/ticket/${booking.id}`;
-      const qrBuffer = await QRCode.toBuffer(verifyUrl, { width: 300, margin: 2 });
-      qrAttachments.push({ filename: 'qrcode.png', content: qrBuffer, cid: 'qrcode' });
-      qrImgHtml = `<div style="text-align:center;margin:20px 0"><img src="cid:qrcode" alt="QR Ticket" style="width:200px;height:200px" /><p style="color:#666;font-size:12px;margin-top:4px">Show this QR at the venue for entry</p></div>`;
-    } catch (qrErr) {
-      console.error('Failed to generate QR for email:', qrErr?.message);
-    }
-
-    const emailHtml = `<h2>Booking Confirmed!</h2><p>Hi ${user?.name || 'there'},</p><p>Your booking for <strong>${eventTitle}</strong>${venueName ? ` at ${venueName}` : ''} is confirmed.</p><p><strong>Seats:</strong> ${seatList}</p><p><strong>Total:</strong> ₹${Number(booking.totalAmount).toLocaleString('en-IN')}</p>${qrImgHtml}<p>Thank you for your booking!</p>`;
-
-    const mailOptions = {
-      from: env.EMAIL_FROM,
-      to: user?.email,
-      subject: `Booking Confirmed - ${eventTitle}`,
-      html: emailHtml,
-      attachments: qrAttachments,
-    };
-
-    const { getQueue } = require('../../queues/queues');
-    const emailQueue = getQueue('email');
-    if (emailQueue) {
-      // Queue path (Redis available) — encode buffer as base64 for serialization
-      const serializedAttachments = qrAttachments.map(a => ({
-        ...a,
-        content: a.content ? a.content.toString('base64') : undefined,
-        encoding: 'base64',
-      }));
-      await emailQueue.add('booking-confirmation', {
-        bookingId: booking.id,
-        userId,
-        email: user?.email,
-        subject: `Booking Confirmed - ${eventTitle}`,
-        html: emailHtml,
-        attachments: serializedAttachments,
-      });
-    } else {
-      // Direct send fallback (no Redis)
-      const nodemailer = require('nodemailer');
-      const transporter = nodemailer.createTransport({
-        host: env.SMTP_HOST,
-        port: env.SMTP_PORT,
-        secure: false,
-        auth: { user: env.SMTP_USER, pass: env.SMTP_PASS },
-      });
-      await transporter.sendMail(mailOptions);
-    }
-
-    // Log email
-    await prisma.emailLog.create({
-      data: { userId, to: user?.email, subject: `Booking Confirmed - ${eventTitle}`, status: 'SENT', bookingId: booking.id },
-    });
-  } catch (e) {
-    console.error('Failed to send booking email:', e?.message);
-  }
-
-  // Audit log
-  try {
-    await prisma.auditLog.create({
-      data: {
-        userId,
-        action: 'BOOKING_CREATED',
-        entityType: 'Booking',
-        entityId: booking.id,
-        metadata: { eventId, seatCount: seatIds.length, totalAmount: Number(booking.totalAmount) },
-      },
-    });
-  } catch {}
-
-  return booking;
   } finally {
+    // Release lock IMMEDIATELY after transaction — before side effects
     await releaseLock(lockKey, lockToken);
   }
+
+  // Generate QR code for immediate frontend response (non-blocking for user)
+  let qrData = null;
+  try {
+    qrData = await generateQrImage(booking.id);
+  } catch (qrErr) {
+    console.error('QR generation failed:', qrErr?.message);
+  }
+
+  // Clear Redis hold keys (non-blocking)
+  if (redis.isAvailable) {
+    for (const seatId of seatIds) {
+      redis.del(`seat:hold:${seatId}`).catch(() => {});
+    }
+  }
+
+  // Run all side effects in background — don't block response
+  setImmediate(async () => {
+    try {
+      // Broadcast seat booked
+      const { getSocketServer } = require('../../sockets');
+      const io = getSocketServer();
+      if (io) {
+        io.to(`event:${eventId}`).emit('seatBooked', { eventId, seatIds, userId });
+      }
+    } catch {}
+
+    try {
+      // Create notification for the user
+      const seatList = booking.bookingSeats.map((bs) => bs.seat.seatNumber).join(', ');
+      await prisma.notification.create({
+        data: {
+          userId,
+          type: 'BOOKING_CONFIRMED',
+          title: 'Booking Confirmed',
+          message: `Your booking for ${booking.event?.movie?.title || 'Event'} (${seatList}) is confirmed. Total: ₹${Number(booking.totalAmount).toLocaleString('en-IN')}`,
+        },
+      });
+      const { getSocketServer } = require('../../sockets');
+      const io = getSocketServer();
+      if (io) {
+        io.to(`user:${userId}`).emit('notification', {
+          type: 'BOOKING_CONFIRMED',
+          title: 'Booking Confirmed',
+          message: `Your booking is confirmed. Total: ₹${Number(booking.totalAmount).toLocaleString('en-IN')}`,
+        });
+      }
+    } catch {}
+
+    // Send booking confirmation email (via queue if Redis available, fallback to direct send)
+    try {
+      const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true, name: true } });
+      const seatList = booking.bookingSeats.map((bs) => bs.seat.seatNumber).join(', ');
+      const eventTitle = booking.event?.movie?.title || 'Event';
+      const venueName = booking.event?.movie?.venue?.name || '';
+
+      // Generate QR image buffer for email embedding
+      let qrAttachments = [];
+      let qrImgHtml = '';
+      try {
+        const QRCode = require('qrcode');
+        const verifyUrl = `${env.FRONTEND_URL}/ticket/${booking.id}`;
+        const qrBuffer = await QRCode.toBuffer(verifyUrl, { width: 300, margin: 2 });
+        qrAttachments.push({ filename: 'qrcode.png', content: qrBuffer, cid: 'qrcode' });
+        qrImgHtml = `<div style="text-align:center;margin:20px 0"><img src="cid:qrcode" alt="QR Ticket" style="width:200px;height:200px" /><p style="color:#666;font-size:12px;margin-top:4px">Show this QR at the venue for entry</p></div>`;
+      } catch (qrErr) {
+        console.error('Failed to generate QR for email:', qrErr?.message);
+      }
+
+      const emailHtml = `<h2>Booking Confirmed!</h2><p>Hi ${user?.name || 'there'},</p><p>Your booking for <strong>${eventTitle}</strong>${venueName ? ` at ${venueName}` : ''} is confirmed.</p><p><strong>Seats:</strong> ${seatList}</p><p><strong>Total:</strong> ₹${Number(booking.totalAmount).toLocaleString('en-IN')}</p>${qrImgHtml}<p>Thank you for your booking!</p>`;
+
+      const mailOptions = {
+        from: env.EMAIL_FROM,
+        to: user?.email,
+        subject: `Booking Confirmed - ${eventTitle}`,
+        html: emailHtml,
+        attachments: qrAttachments,
+      };
+
+      const { getQueue } = require('../../queues/queues');
+      const emailQueue = getQueue('email');
+      if (emailQueue) {
+        // Queue path (Redis available) — encode buffer as base64 for serialization
+        const serializedAttachments = qrAttachments.map((a) => ({
+          ...a,
+          content: a.content ? a.content.toString('base64') : undefined,
+          encoding: 'base64',
+        }));
+        await emailQueue.add('booking-confirmation', {
+          bookingId: booking.id,
+          userId,
+          email: user?.email,
+          subject: `Booking Confirmed - ${eventTitle}`,
+          html: emailHtml,
+          attachments: serializedAttachments,
+        });
+      } else {
+        // Direct send fallback (no Redis)
+        const nodemailer = require('nodemailer');
+        const transporter = nodemailer.createTransport({
+          host: env.SMTP_HOST,
+          port: env.SMTP_PORT,
+          secure: false,
+          auth: { user: env.SMTP_USER, pass: env.SMTP_PASS },
+        });
+        await transporter.sendMail(mailOptions);
+      }
+
+      // Log email
+      await prisma.emailLog.create({
+        data: { userId, to: user?.email, subject: `Booking Confirmed - ${eventTitle}`, status: 'SENT', bookingId: booking.id },
+      });
+    } catch (e) {
+      console.error('Failed to send booking email:', e?.message);
+    }
+
+    // Audit log
+    try {
+      await prisma.auditLog.create({
+        data: {
+          userId,
+          action: 'BOOKING_CREATED',
+          entityType: 'Booking',
+          entityId: booking.id,
+          metadata: { eventId, seatCount: seatIds.length, totalAmount: Number(booking.totalAmount) },
+        },
+      });
+    } catch {}
+  });
+
+  // Return booking with QR data so frontend doesn't need second API call
+  return {
+    ...booking,
+    qrImage: qrData?.qrImage,
+    qrToken: qrData?.qrToken,
+  };
 }
 
 async function getUserBookings(userId) {
@@ -331,7 +346,7 @@ async function cancelBooking(bookingId, userId, reason) {
 
   // Create cancellation notification for the user
   try {
-    const seatList = booking.bookingSeats.map(bs => bs.seat.seatNumber).join(', ');
+    const seatList = booking.bookingSeats.map((bs) => bs.seat.seatNumber).join(', ');
     const eventTitle = booking.event?.movie?.title || 'Event';
     await prisma.notification.create({
       data: {
@@ -354,7 +369,7 @@ async function cancelBooking(bookingId, userId, reason) {
 
   // Send cancellation email
   try {
-    const seatList = booking.bookingSeats.map(bs => bs.seat.seatNumber).join(', ');
+    const seatList = booking.bookingSeats.map((bs) => bs.seat.seatNumber).join(', ');
     const eventTitle = booking.event?.movie?.title || 'Event';
     const venueName = booking.event?.movie?.venue?.name || '';
     const totalRefund = Number(booking.totalAmount).toFixed(2);
@@ -405,7 +420,6 @@ ${reason ? `<p><strong>Reason:</strong> ${reason}</p>` : ''}
         data: { userId, to: booking.user?.email, subject: `Booking Cancelled - ${eventTitle}`, status: 'SENT', bookingId },
       });
     } catch {}
-
   } catch (e) {
     console.error('Failed to send cancellation email:', e?.message);
   }

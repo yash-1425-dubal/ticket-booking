@@ -25,15 +25,7 @@ interface SeatMapData {
   rows: Seat[][];
 }
 
-function BookingSuccessView({ bookingId, totalAmount }: { bookingId: string; totalAmount: number }) {
-  const [qrImage, setQrImage] = useState<string | null>(null);
-
-  useEffect(() => {
-    api.get<{ success: boolean; data: { qrImage: string } }>(`/qr/${bookingId}/qr`)
-      .then((res) => setQrImage(res.data.qrImage))
-      .catch(() => {});
-  }, [bookingId]);
-
+function BookingSuccessView({ booking, qrImage, totalAmount }: { booking: any; qrImage?: string; totalAmount: number }) {
   return (
     <div className="max-w-4xl mx-auto px-4 py-8 text-center">
       <div className="card max-w-md mx-auto">
@@ -48,7 +40,7 @@ function BookingSuccessView({ bookingId, totalAmount }: { bookingId: string; tot
         )}
         <p className="text-sm text-gray-500 mb-4">A confirmation email with QR has been sent to your email address.</p>
         <div className="flex gap-2 justify-center">
-          <Link href={`/bookings/${bookingId}`} className="btn-primary">View Booking Details</Link>
+          <Link href={`/bookings/${booking.id}`} className="btn-primary">View Booking Details</Link>
           <Link href="/movies" className="btn-outline">Browse More</Link>
         </div>
       </div>
@@ -262,12 +254,12 @@ export default function BookingPage() {
     setError('');
     try {
       const idempotencyKey = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
-      const res = await api.post<{ success: boolean; data: any }>(
+      const res = await api.post<{ success: boolean; data: { booking: any; qrImage?: string } }>(
         `/bookings/${eventId}`,
         { seatIds: heldSeats },
         idempotencyKey
       );
-      setSuccessBooking(res.data);
+      setSuccessBooking({ booking: res.data.booking, qrImage: res.data.qrImage, totalAmount: res.data.booking.totalAmount });
       // Update seatMap locally to show BOOKED immediately
       setSeatMap((prev) => {
         if (!prev) return prev;
@@ -321,8 +313,8 @@ export default function BookingPage() {
   if (!seatMap) return <div className="max-w-4xl mx-auto px-4 py-8"><p>Event not found</p></div>;
 
   if (successBooking) {
-    const bookingId = successBooking.id;
-    return <BookingSuccessView bookingId={bookingId} totalAmount={successBooking.totalAmount} />;
+    const booking = successBooking.booking || successBooking;
+    return <BookingSuccessView booking={booking} qrImage={successBooking.qrImage} totalAmount={successBooking.totalAmount || booking.totalAmount} />;
   }
 
   return (
