@@ -18,6 +18,8 @@ const env = {
   SEAT_HOLD_TTL_MINUTES: parseInt(process.env.SEAT_HOLD_TTL_MINUTES, 10) || 10,
   WAITLIST_OFFER_TTL_MINUTES: parseInt(process.env.WAITLIST_OFFER_TTL_MINUTES, 10) || 15,
   LOG_LEVEL: process.env.LOG_LEVEL || 'info',
+  RESEND_API_KEY: process.env.RESEND_API_KEY || '',
+  RESEND_FROM_EMAIL: process.env.RESEND_FROM_EMAIL || '',
   PARSE_API_KEY: process.env.PARSE_API_KEY || '',
   PARSE_BASE_URL: process.env.PARSE_BASE_URL || '',
 };

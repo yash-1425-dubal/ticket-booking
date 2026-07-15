@@ -6,6 +6,60 @@ const { acquireLock, releaseLock } = require('../../utils/redisLock');
 const { v4: uuidv4 } = require('uuid');
 const { generateQrImage } = require('../qr/qr.service');
 
+// 3-tier email sender: Resend API → SMTP → Ethereal fallback
+async function sendEmail({ to, subject, html, attachments }) {
+  if (env.RESEND_API_KEY) {
+    const axios = require('axios');
+    const payload = {
+      from: env.RESEND_FROM_EMAIL || 'TicketBook <onboarding@resend.dev>',
+      to: Array.isArray(to) ? to : [to],
+      subject,
+      html,
+      attachments: attachments?.map(a => ({
+        filename: a.filename,
+        content: a.content.toString('base64'),
+      })) || [],
+    };
+    const response = await axios.post('https://api.resend.com/emails', payload, {
+      headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      timeout: 10000,
+    });
+    console.log(`Email sent via Resend API: ${response.data.id}`);
+    return;
+  }
+
+  if (env.SMTP_HOST && env.SMTP_USER && env.SMTP_PASS) {
+    const nodemailer = require('nodemailer');
+    const transporter = nodemailer.createTransport({
+      host: env.SMTP_HOST,
+      port: env.SMTP_PORT,
+      secure: env.SMTP_PORT === 465,
+      auth: { user: env.SMTP_USER, pass: env.SMTP_PASS },
+    });
+    const info = await transporter.sendMail({
+      from: env.EMAIL_FROM || `"TicketBook" <${env.SMTP_USER}>`,
+      to,
+      subject,
+      html,
+      attachments,
+    });
+    console.log(`Email sent via SMTP: ${info.messageId}`);
+    return;
+  }
+
+  // Ethereal fallback (fake inbox — visible at ethereal.email)
+  const nodemailer = require('nodemailer');
+  const testAccount = await nodemailer.createTestAccount();
+  const transporter = nodemailer.createTransport({
+    host: 'smtp.ethereal.email', port: 587, secure: false,
+    auth: { user: testAccount.user, pass: testAccount.pass },
+  });
+  const info = await transporter.sendMail({
+    from: '"TicketBook Dev" <dev@ticketbook.local>', to, subject, html, attachments,
+  });
+  console.log(`Email sent via Ethereal: ${info.messageId} — View at ${nodemailer.getTestMessageUrl(info)}`);
+}
+
 async function createBooking(eventId, seatIds, userId, idempotencyKey) {
   if (!seatIds || seatIds.length === 0) {
     throw ApiError.badRequest('No seats specified');
@@ -175,14 +229,6 @@ async function createBooking(eventId, seatIds, userId, idempotencyKey) {
 
       const emailHtml = `<h2>Booking Confirmed!</h2><p>Hi ${user?.name || 'there'},</p><p>Your booking for <strong>${eventTitle}</strong>${venueName ? ` at ${venueName}` : ''} is confirmed.</p><p><strong>Seats:</strong> ${seatList}</p><p><strong>Total:</strong> ₹${Number(booking.totalAmount).toLocaleString('en-IN')}</p>${qrImgHtml}<p>Thank you for your booking!</p>`;
 
-      const mailOptions = {
-        from: env.EMAIL_FROM,
-        to: user?.email,
-        subject: `Booking Confirmed - ${eventTitle}`,
-        html: emailHtml,
-        attachments: qrAttachments,
-      };
-
       const { getQueue } = require('../../queues/queues');
       const emailQueue = getQueue('email');
       if (emailQueue) {
@@ -201,15 +247,13 @@ async function createBooking(eventId, seatIds, userId, idempotencyKey) {
           attachments: serializedAttachments,
         });
       } else {
-        // Direct send fallback (no Redis)
-        const nodemailer = require('nodemailer');
-        const transporter = nodemailer.createTransport({
-          host: env.SMTP_HOST,
-          port: env.SMTP_PORT,
-          secure: false,
-          auth: { user: env.SMTP_USER, pass: env.SMTP_PASS },
+        // Direct send fallback (no Redis) — use 3-tier sender
+        await sendEmail({
+          to: user?.email,
+          subject: `Booking Confirmed - ${eventTitle}`,
+          html: emailHtml,
+          attachments: qrAttachments,
         });
-        await transporter.sendMail(mailOptions);
       }
 
       // Log email
@@ -402,13 +446,6 @@ ${reason ? `<p><strong>Reason:</strong> ${reason}</p>` : ''}
 <hr />
 <p style="color:#666;font-size:12px">This is an automated message from TicketBook.</p>`;
 
-      const mailOptions = {
-        from: env.EMAIL_FROM,
-        to: booking.user?.email,
-        subject: `Booking Cancelled - ${eventTitle}`,
-        html: emailHtml,
-      };
-
       const { getQueue } = require('../../queues/queues');
       const emailQueue = getQueue('email');
       if (emailQueue) {
@@ -420,14 +457,12 @@ ${reason ? `<p><strong>Reason:</strong> ${reason}</p>` : ''}
           html: emailHtml,
         });
       } else {
-        const nodemailer = require('nodemailer');
-        const transporter = nodemailer.createTransport({
-          host: env.SMTP_HOST,
-          port: env.SMTP_PORT,
-          secure: false,
-          auth: { user: env.SMTP_USER, pass: env.SMTP_PASS },
+        // Direct send fallback (no Redis) — use 3-tier sender
+        await sendEmail({
+          to: booking.user?.email,
+          subject: `Booking Cancelled - ${eventTitle}`,
+          html: emailHtml,
         });
-        await transporter.sendMail(mailOptions);
       }
 
       // Log cancellation email
