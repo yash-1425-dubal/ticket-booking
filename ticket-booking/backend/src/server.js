@@ -17,21 +17,27 @@ app.set('io', io);
 
 async function start() {
   try {
+    console.log('[START] Connecting to database...');
     await prisma.$connect();
-    console.log('Database connected');
+    console.log('[START] Database connected');
 
     // Start fallback cron for expired seat holds (runs regardless of Redis)
+    console.log('[START] Starting fallback cron...');
     startFallbackCron();
 
     // Initialize queues
+    console.log('[START] Initializing queues...');
     initQueues();
+
+    console.log('[START] Setting up workers...');
     setupWorkers().catch(console.error);
 
-    server.listen(env.PORT, () => {
-      console.log(`Server running on port ${env.PORT}`);
+    console.log('[START] Starting server on port', env.PORT, '...');
+    server.listen(env.PORT, '0.0.0.0', () => {
+      console.log(`[START] Server running on port ${env.PORT}`);
     });
   } catch (error) {
-    console.error('Failed to start server:', error);
+    console.error('[START] Failed to start server:', error);
     process.exit(1);
   }
 }
