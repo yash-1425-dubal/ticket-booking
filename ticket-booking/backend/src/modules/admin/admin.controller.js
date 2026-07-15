@@ -138,4 +138,20 @@ const testEmail = asyncHandler(async (req, res) => {
   sendSuccess(res, 200, { configStatus, result, recentLogs, redisAvailable, queueJobCounts });
 });
 
-module.exports = { getUsers, updateRole, removeUser, getBookings, getAuditLogs, getConfig, updateConfig, testEmail };
+const emailConfig = asyncHandler(async (req, res) => {
+  const configStatus = {
+    resendConfigured: !!env.RESEND_API_KEY,
+    smtpConfigured: !!(env.SMTP_HOST && env.SMTP_USER && env.SMTP_PASS),
+    smtpHost: env.SMTP_HOST || '(not set)',
+    smtpPort: env.SMTP_PORT,
+    smtpUserPrefix: env.SMTP_USER ? env.SMTP_USER.substring(0, 4) + '...' : '(not set)',
+    emailFrom: env.EMAIL_FROM,
+  };
+  let recentLogs = [];
+  try {
+    recentLogs = await prisma.emailLog.findMany({ orderBy: { createdAt: 'desc' }, take: 5, select: { id: true, to: true, subject: true, status: true, createdAt: true } });
+  } catch {}
+  sendSuccess(res, 200, { configStatus, recentLogs });
+});
+
+module.exports = { getUsers, updateRole, removeUser, getBookings, getAuditLogs, getConfig, updateConfig, testEmail, emailConfig };
