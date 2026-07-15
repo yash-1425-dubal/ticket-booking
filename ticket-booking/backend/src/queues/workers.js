@@ -41,6 +41,23 @@ async function setupWorkers() {
     return response.data;
   }
 
+  // Real SMTP transporter (Gmail, Brevo, Outlook, etc.)
+  let smtpTransporter = null;
+  function getSmtpTransporter() {
+    if (smtpTransporter) return smtpTransporter;
+    if (!env.SMTP_HOST || !env.SMTP_USER || !env.SMTP_PASS) {
+      return null;
+    }
+    smtpTransporter = nodemailer.createTransport({
+      host: env.SMTP_HOST,
+      port: env.SMTP_PORT || 587,
+      secure: env.SMTP_PORT === '465', // true for 465, false for 587
+      auth: { user: env.SMTP_USER, pass: env.SMTP_PASS },
+    });
+    console.log('📧 SMTP transporter configured:', env.SMTP_HOST);
+    return smtpTransporter;
+  }
+
   // Ethereal.email fallback for development (fake SMTP, completely free, no domain needed)
   let etherealTransporter = null;
   async function getEtherealTransporter() {
@@ -57,31 +74,47 @@ async function setupWorkers() {
     return etherealTransporter;
   }
 
-  // Email worker: Resend API (prod) or Ethereal (dev)
+  // Email worker: Resend API (prod) → Real SMTP → Ethereal (dev)
   const emailWorker = new Worker('email', async (job) => {
     const { type, bookingId, userId, email, subject, html, attachments } = job.data;
     const recipient = email || userId;
     console.log(`Processing email job: ${type} for booking ${bookingId} -> ${recipient}`);
 
     if (env.RESEND_API_KEY) {
-      // Production: Resend API
+      // Priority 1: Resend API (production, HTTPS, no port issues)
       const result = await sendViaResendAPI({ to: recipient, subject, html, attachments });
       console.log(`Email sent via Resend API: ${result.id}`);
     } else {
-      // Development: Ethereal.email (fake inbox)
-      const transporter = await getEtherealTransporter();
-      const info = await transporter.sendMail({
-        from: '"TicketBook Dev" <dev@ticketbook.local>',
-        to: recipient,
-        subject,
-        html,
-        attachments: attachments?.map(a => ({
-          filename: a.filename,
-          content: a.content,
-        })) || [],
-      });
-      console.log(`📧 Ethereal email sent: ${info.messageId}`);
-      console.log(`📧 Preview URL: ${nodemailer.getTestMessageUrl(info)}`);
+      // Priority 2: Real SMTP (Gmail, Brevo, Outlook, etc.)
+      const smtpTransporter = getSmtpTransporter();
+      if (smtpTransporter) {
+        const info = await smtpTransporter.sendMail({
+          from: env.EMAIL_FROM || `"TicketBook" <${env.SMTP_USER}>`,
+          to: recipient,
+          subject,
+          html,
+          attachments: attachments?.map(a => ({
+            filename: a.filename,
+            content: a.content,
+          })) || [],
+        });
+        console.log(`📧 Email sent via SMTP: ${info.messageId}`);
+      } else {
+        // Priority 3: Ethereal.email (fake inbox for dev)
+        const transporter = await getEtherealTransporter();
+        const info = await transporter.sendMail({
+          from: '"TicketBook Dev" <dev@ticketbook.local>',
+          to: recipient,
+          subject,
+          html,
+          attachments: attachments?.map(a => ({
+            filename: a.filename,
+            content: a.content,
+          })) || [],
+        });
+        console.log(`📧 Ethereal email sent: ${info.messageId}`);
+        console.log(`📧 Preview URL: ${nodemailer.getTestMessageUrl(info)}`);
+      }
     }
 
     // Log email in database
