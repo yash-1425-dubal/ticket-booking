@@ -492,4 +492,4 @@ ${reason ? `<p><strong>Reason:</strong> ${reason}</p>` : ''}
   return cancelledBooking;
 }
 
-module.exports = { createBooking, getUserBookings, getBookingById, cancelBooking };
+module.exports = { createBooking, getUserBookings, getBookingById, cancelBooking, sendEmail };

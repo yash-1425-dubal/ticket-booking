@@ -12,5 +12,6 @@ router.get('/bookings', authMiddleware, isAdmin, controller.getBookings);
 router.get('/audit-logs', authMiddleware, isAdmin, controller.getAuditLogs);
 router.get('/config', authMiddleware, isAdmin, controller.getConfig);
 router.put('/config', authMiddleware, isAdmin, controller.updateConfig);
+router.post('/test-email', authMiddleware, isAdmin, controller.testEmail);
 
 module.exports = router;
