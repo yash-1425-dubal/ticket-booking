@@ -309,7 +309,7 @@ export default function ScraperMovieDetailPage() {
     setError('');
     try {
       const res = await api.post<{ success: boolean; data: { movieId: string; eventId: string } }>(
-        '/organizer/import-scraper-movie',
+        '/scraper/import-scraper-movie',
         {
           title: movie.event_name || movie.title,
           description: movie.description,
