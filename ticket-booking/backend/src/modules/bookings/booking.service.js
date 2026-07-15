@@ -28,6 +28,23 @@ async function sendEmail({ to, subject, html, attachments }) {
     return;
   }
 
+  if (env.BREVO_API_KEY) {
+    const axios = require('axios');
+    const payload = {
+      sender: { email: env.EMAIL_FROM || 'noreply@ticketbooking.com', name: 'TicketBook' },
+      to: Array.isArray(to) ? to.map(e => ({ email: e })) : [{ email: to }],
+      subject,
+      htmlContent: html,
+      attachment: attachments?.map(a => ({ name: a.filename, content: a.content.toString('base64') })) || [],
+    };
+    const response = await axios.post('https://api.brevo.com/v3/smtp/email', payload, {
+      headers: { 'api-key': env.BREVO_API_KEY, 'Content-Type': 'application/json' },
+      timeout: 10000,
+    });
+    console.log(`Email sent via Brevo API: ${response.data.messageId}`);
+    return;
+  }
+
   if (env.SMTP_HOST && env.SMTP_USER && env.SMTP_PASS) {
     const nodemailer = require('nodemailer');
     const transporter = nodemailer.createTransport({

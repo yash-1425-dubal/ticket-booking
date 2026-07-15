@@ -74,7 +74,33 @@ async function setupWorkers() {
     return etherealTransporter;
   }
 
-  // Email worker: Resend API (prod) → Real SMTP → Ethereal (dev)
+  // Brevo Transactional API sender (HTTPS, port 443, no SMTP needed)
+  async function sendViaBrevoAPI({ to, subject, html, attachments }) {
+    const apiKey = env.BREVO_API_KEY;
+    if (!apiKey) throw new Error('BREVO_API_KEY not set');
+
+    const payload = {
+      sender: { email: env.EMAIL_FROM || 'noreply@ticketbooking.com', name: 'TicketBook' },
+      to: Array.isArray(to) ? to.map(e => ({ email: e })) : [{ email: to }],
+      subject,
+      htmlContent: html,
+      attachment: attachments?.map(a => ({
+        name: a.filename,
+        content: a.content.toString('base64'),
+      })) || [],
+    };
+
+    const response = await axios.post('https://api.brevo.com/v3/smtp/email', payload, {
+      headers: {
+        'api-key': apiKey,
+        'Content-Type': 'application/json',
+      },
+      timeout: 10000,
+    });
+    return response.data;
+  }
+
+  // Email worker: Resend API → Brevo API → Real SMTP → Ethereal (dev)
   const emailWorker = new Worker('email', async (job) => {
     const { type, bookingId, userId, email, subject, html, attachments } = job.data;
     const recipient = email || userId;
@@ -84,8 +110,12 @@ async function setupWorkers() {
       // Priority 1: Resend API (production, HTTPS, no port issues)
       const result = await sendViaResendAPI({ to: recipient, subject, html, attachments });
       console.log(`Email sent via Resend API: ${result.id}`);
+    } else if (env.BREVO_API_KEY) {
+      // Priority 2: Brevo API (HTTPS, 300 free emails/day, no SMTP)
+      const result = await sendViaBrevoAPI({ to: recipient, subject, html, attachments });
+      console.log(`Email sent via Brevo API: ${result.messageId}`);
     } else {
-      // Priority 2: Real SMTP (Gmail, Brevo, Outlook, etc.)
+      // Priority 3: Real SMTP (Gmail, Brevo, Outlook, etc.)
       const smtpTransporter = getSmtpTransporter();
       if (smtpTransporter) {
         const info = await smtpTransporter.sendMail({
@@ -100,7 +130,7 @@ async function setupWorkers() {
         });
         console.log(`📧 Email sent via SMTP: ${info.messageId}`);
       } else {
-        // Priority 3: Ethereal.email (fake inbox for dev)
+        // Priority 4: Ethereal.email (fake inbox for dev)
         const transporter = await getEtherealTransporter();
         const info = await transporter.sendMail({
           from: '"TicketBook Dev" <dev@ticketbook.local>',

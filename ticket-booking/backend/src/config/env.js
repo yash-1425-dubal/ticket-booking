@@ -20,6 +20,7 @@ const env = {
   LOG_LEVEL: process.env.LOG_LEVEL || 'info',
   RESEND_API_KEY: process.env.RESEND_API_KEY || '',
   RESEND_FROM_EMAIL: process.env.RESEND_FROM_EMAIL || '',
+  BREVO_API_KEY: process.env.BREVO_API_KEY || '',
   PARSE_API_KEY: process.env.PARSE_API_KEY || '',
   PARSE_BASE_URL: process.env.PARSE_BASE_URL || '',
 };

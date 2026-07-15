@@ -26,6 +26,23 @@ async function sendDiagnosticEmail({ to, subject, html, attachments }) {
     return 'Sent via Resend API';
   }
 
+  if (env.BREVO_API_KEY) {
+    const axios = require('axios');
+    const payload = {
+      sender: { email: env.EMAIL_FROM || 'noreply@ticketbooking.com', name: 'TicketBook' },
+      to: Array.isArray(to) ? to.map(e => ({ email: e })) : [{ email: to }],
+      subject,
+      htmlContent: html,
+      attachment: attachments?.map(a => ({ name: a.filename, content: a.content.toString('base64') })) || [],
+    };
+    const response = await axios.post('https://api.brevo.com/v3/smtp/email', payload, {
+      headers: { 'api-key': env.BREVO_API_KEY, 'Content-Type': 'application/json' },
+      timeout: 10000,
+    });
+    console.log(`[TestEmail] Sent via Brevo API: ${response.data.messageId}`);
+    return 'Sent via Brevo API';
+  }
+
   if (env.SMTP_HOST && env.SMTP_USER && env.SMTP_PASS) {
     const nodemailer = require('nodemailer');
     const transporter = nodemailer.createTransport({
@@ -103,6 +120,7 @@ const testEmail = asyncHandler(async (req, res) => {
   const configStatus = {
     resendConfigured: !!env.RESEND_API_KEY,
     resendFrom: env.RESEND_FROM_EMAIL || '(not set)',
+    brevoConfigured: !!env.BREVO_API_KEY,
     smtpConfigured: !!(env.SMTP_HOST && env.SMTP_USER && env.SMTP_PASS),
     smtpHost: env.SMTP_HOST || '(not set)',
     smtpPort: env.SMTP_PORT,
@@ -157,6 +175,7 @@ const emailConfig = asyncHandler(async (req, res) => {
   }
   const configStatus = {
     resendConfigured: !!env.RESEND_API_KEY,
+    brevoConfigured: !!env.BREVO_API_KEY,
     smtpConfigured: !!(env.SMTP_HOST && env.SMTP_USER && env.SMTP_PASS),
     smtpHost: env.SMTP_HOST || '(not set)',
     smtpPort: env.SMTP_PORT,
