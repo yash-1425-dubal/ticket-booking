@@ -292,6 +292,7 @@ async function cancelBooking(bookingId, userId, reason) {
   }
 
   let booking;
+  let cancelledBooking;
   try {
     booking = await prisma.booking.findUnique({
       where: { id: bookingId },
@@ -315,7 +316,7 @@ async function cancelBooking(bookingId, userId, reason) {
       throw ApiError.badRequest('Booking cannot be cancelled');
     }
 
-    const cancelledBooking = await prisma.$transaction(async (tx) => {
+    cancelledBooking = await prisma.$transaction(async (tx) => {
       // Update booking status
       const updated = await tx.booking.update({
         where: { id: bookingId },
