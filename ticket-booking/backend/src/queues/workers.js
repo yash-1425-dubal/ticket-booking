@@ -75,7 +75,9 @@ async function setupWorkers() {
     });
 
     if (useEthereal) {
-      console.log(`Ethereal preview URL: ${nodemailer.getTestMessageUrl(info)}`);
+      const previewUrl = nodemailer.getTestMessageUrl(info);
+      console.log(`Ethereal preview URL: ${previewUrl}`);
+      console.log('>>> OPEN THIS URL TO VIEW TEST EMAIL <<<');
     } else {
       console.log(`Email sent: ${info.messageId}`);
     }
