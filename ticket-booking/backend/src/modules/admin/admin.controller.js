@@ -139,6 +139,22 @@ const testEmail = asyncHandler(async (req, res) => {
 });
 
 const emailConfig = asyncHandler(async (req, res) => {
+  let smtpVerify = 'not tested';
+  if (env.SMTP_HOST && env.SMTP_USER && env.SMTP_PASS) {
+    try {
+      const nodemailer = require('nodemailer');
+      const transporter = nodemailer.createTransport({
+        host: env.SMTP_HOST,
+        port: env.SMTP_PORT,
+        secure: env.SMTP_PORT === 465,
+        auth: { user: env.SMTP_USER, pass: env.SMTP_PASS },
+      });
+      await transporter.verify();
+      smtpVerify = 'OK';
+    } catch (err) {
+      smtpVerify = `FAILED: ${err.message}`;
+    }
+  }
   const configStatus = {
     resendConfigured: !!env.RESEND_API_KEY,
     smtpConfigured: !!(env.SMTP_HOST && env.SMTP_USER && env.SMTP_PASS),
@@ -146,10 +162,11 @@ const emailConfig = asyncHandler(async (req, res) => {
     smtpPort: env.SMTP_PORT,
     smtpUserPrefix: env.SMTP_USER ? env.SMTP_USER.substring(0, 4) + '...' : '(not set)',
     emailFrom: env.EMAIL_FROM,
+    smtpVerify,
   };
   let recentLogs = [];
   try {
-    recentLogs = await prisma.emailLog.findMany({ orderBy: { createdAt: 'desc' }, take: 5, select: { id: true, to: true, subject: true, status: true, createdAt: true } });
+    recentLogs = await prisma.emailLog.findMany({ orderBy: { createdAt: 'desc' }, take: 10, select: { id: true, to: true, subject: true, status: true, createdAt: true } });
   } catch {}
   sendSuccess(res, 200, { configStatus, recentLogs });
 });
