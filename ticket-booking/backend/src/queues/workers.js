@@ -1,7 +1,7 @@
 const { Worker } = require('bullmq');
 const connection = require('./connection');
-const nodemailer = require('nodemailer');
 const axios = require('axios');
+const nodemailer = require('nodemailer');
 const prisma = require('../config/prisma');
 const env = require('../config/env');
 const { releaseExpiredHolds } = require('../modules/seats/seat.service');
@@ -21,7 +21,7 @@ async function setupWorkers() {
     if (!apiKey) throw new Error('RESEND_API_KEY not set');
 
     const payload = {
-      from: env.RESEND_FROM_EMAIL || env.EMAIL_FROM || 'TicketBook <onboarding@resend.dev>',
+      from: env.RESEND_FROM_EMAIL || 'TicketBook <onboarding@resend.dev>',
       to: Array.isArray(to) ? to : [to],
       subject,
       html,
@@ -41,37 +41,7 @@ async function setupWorkers() {
     return response.data;
   }
 
-  // SendGrid Web API sender (uses HTTPS, never blocked)
-  async function sendViaSendGridAPI({ to, subject, html, attachments }) {
-    const apiKey = env.SENDGRID_API_KEY;
-    if (!apiKey) throw new Error('SENDGRID_API_KEY not set');
-
-    const payload = {
-      personalizations: [{ to: [{ email: to }], subject }],
-      from: { email: env.SENDGRID_FROM_EMAIL || env.EMAIL_FROM, name: 'TicketBook' },
-      content: [{ type: 'text/html', value: html }],
-    };
-
-    if (attachments?.length) {
-      payload.attachments = attachments.map(a => ({
-        content: a.content.toString('base64'),
-        filename: a.filename,
-        type: a.contentType || 'application/octet-stream',
-        disposition: 'attachment',
-      }));
-    }
-
-    const response = await axios.post('https://api.sendgrid.com/v3/mail/send', payload, {
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      timeout: 10000,
-    });
-    return response.data;
-  }
-
-  // Email worker: tries Resend → SendGrid API → SMTP → Ethereal
+  // Email worker: Resend API → Ethereal (fallback for testing)
   const emailWorker = new Worker('email', async (job) => {
     const { type, bookingId, userId, email, subject, html, attachments } = job.data;
     const recipient = email || userId;
@@ -82,7 +52,7 @@ async function setupWorkers() {
     let previewUrl = null;
     let lastError = null;
 
-    // 1. Try Resend API (best: https, generous free tier, great DX)
+    // 1. Try Resend API (HTTPS, never blocked, great DX)
     if (env.RESEND_API_KEY) {
       try {
         const result = await sendViaResendAPI({ to: recipient, subject, html, attachments });
@@ -95,92 +65,7 @@ async function setupWorkers() {
       }
     }
 
-    // 2. Try SendGrid Web API (HTTPS, never blocked)
-    if (!sent && env.SENDGRID_API_KEY) {
-      try {
-        await sendViaSendGridAPI({ to: recipient, subject, html, attachments });
-        sent = true;
-        messageId = `sendgrid-api-${Date.now()}`;
-        console.log('Email sent via SendGrid Web API');
-      } catch (err) {
-        lastError = err;
-        console.warn('SendGrid API failed:', err.message);
-      }
-    }
-
-    // 3. Try SMTP (SendGrid SMTP or Gmail)
-    if (!sent && (env.SMTP_USER && env.SMTP_PASS)) {
-      let transporter;
-      let useEthereal = false;
-      let testAccount = null;
-
-      try {
-        const useSSL = env.SMTP_PORT === '465' || env.SMTP_SECURE === 'true';
-        transporter = nodemailer.createTransport({
-          host: env.SMTP_HOST,
-          port: parseInt(env.SMTP_PORT, 10) || 587,
-          secure: useSSL,
-          connectionTimeout: 10000,
-          greetingTimeout: 10000,
-          socketTimeout: 15000,
-          auth: { user: env.SMTP_USER, pass: env.SMTP_PASS },
-        });
-
-        // Verify connection
-        await transporter.verify();
-        console.log('SMTP connection verified');
-
-        const info = await transporter.sendMail({
-          from: env.EMAIL_FROM,
-          to: recipient,
-          subject: subject || 'Ticket Booking Update',
-          html: html || `<p>Your booking (${bookingId}) has been ${type}.</p>`,
-          attachments: attachments || [],
-        });
-
-        sent = true;
-        messageId = info.messageId;
-        console.log(`Email sent via SMTP: ${info.messageId}`);
-      } catch (smtpErr) {
-        lastError = smtpErr;
-        console.warn('SMTP send failed:', smtpErr.message);
-
-        // Fallback to Ethereal
-        try {
-          testAccount = await nodemailer.createTestAccount();
-          transporter = nodemailer.createTransport({
-            host: 'smtp.ethereal.email',
-            port: 587,
-            secure: false,
-            auth: { user: testAccount.user, pass: testAccount.pass },
-          });
-          useEthereal = true;
-          console.log(`Using Ethereal email: ${testAccount.user}`);
-        } catch (etherealErr) {
-          console.error('Ethereal fallback failed:', etherealErr.message);
-        }
-      }
-
-      if (useEthereal && transporter) {
-        try {
-          const info = await transporter.sendMail({
-            from: env.EMAIL_FROM,
-            to: recipient,
-            subject: subject || 'Ticket Booking Update',
-            html: html || `<p>Your booking (${bookingId}) has been ${type}.</p>`,
-            attachments: attachments || [],
-          });
-          sent = true;
-          previewUrl = nodemailer.getTestMessageUrl(info);
-          console.log(`Ethereal preview URL: ${previewUrl}`);
-          console.log('>>> OPEN THIS URL TO VIEW TEST EMAIL <<<');
-        } catch (e) {
-          console.error('Ethereal send failed:', e.message);
-        }
-      }
-    }
-
-    // 4. Final Ethereal if nothing worked
+    // 2. Final fallback: Ethereal (test emails only)
     if (!sent) {
       try {
         const testAccount = await nodemailer.createTestAccount();
@@ -191,7 +76,7 @@ async function setupWorkers() {
           auth: { user: testAccount.user, pass: testAccount.pass },
         });
         const info = await transporter.sendMail({
-          from: env.EMAIL_FROM,
+          from: env.EMAIL_FROM || 'TicketBook <onboarding@resend.dev>',
           to: recipient,
           subject: subject || 'Ticket Booking Update',
           html: html || `<p>Your booking (${bookingId}) has been ${type}.</p>`,
@@ -201,7 +86,7 @@ async function setupWorkers() {
         console.log(`Ethereal preview URL: ${previewUrl}`);
         console.log('>>> OPEN THIS URL TO VIEW TEST EMAIL <<<');
       } catch (e) {
-        console.error('All email methods failed:', e.message);
+        console.error('Ethereal fallback failed:', e.message);
         throw lastError || e;
       }
     }
