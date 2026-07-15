@@ -138,18 +138,20 @@ async function joinWaitlist(eventId, category, userId) {
     }
   } catch {}
 
-  // Send email notification
-  try {
-    const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true, name: true } });
-    const movieTitle = event.movie?.title || 'Movie';
-    await trySendEmail({
-      type: 'waitlist-joined',
-      userId,
-      email: user?.email || userId,
-      subject: `Added to Waitlist - ${movieTitle}`,
-      html: `<h2>Waitlist Joined</h2><p>Hi ${user?.name || 'there'},</p><p>You are #${position} on the waitlist for <strong>${category}</strong> tickets at <strong>${movieTitle}</strong>.</p><p>We'll notify you when seats become available.</p>`,
-    });
-  } catch {}
+  // Send email notification (non-blocking)
+  setImmediate(async () => {
+    try {
+      const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true, name: true } });
+      const movieTitle = event.movie?.title || 'Movie';
+      await trySendEmail({
+        type: 'waitlist-joined',
+        userId,
+        email: user?.email || userId,
+        subject: `Added to Waitlist - ${movieTitle}`,
+        html: `<h2>Waitlist Joined</h2><p>Hi ${user?.name || 'there'},</p><p>You are #${position} on the waitlist for <strong>${category}</strong> tickets at <strong>${movieTitle}</strong>.</p><p>We'll notify you when seats become available.</p>`,
+      });
+    } catch {}
+  });
 
   return entry;
 }
