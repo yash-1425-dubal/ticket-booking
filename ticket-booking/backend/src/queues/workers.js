@@ -1,6 +1,7 @@
 const { Worker } = require('bullmq');
 const connection = require('./connection');
 const axios = require('axios');
+const nodemailer = require('nodemailer');
 const prisma = require('../config/prisma');
 const env = require('../config/env');
 const { releaseExpiredHolds } = require('../modules/seats/seat.service');
@@ -40,18 +41,48 @@ async function setupWorkers() {
     return response.data;
   }
 
-  // Email worker: Resend API only
+  // Ethereal.email fallback for development (fake SMTP, completely free, no domain needed)
+  let etherealTransporter = null;
+  async function getEtherealTransporter() {
+    if (etherealTransporter) return etherealTransporter;
+    const testAccount = await nodemailer.createTestAccount();
+    etherealTransporter = nodemailer.createTransport({
+      host: 'smtp.ethereal.email',
+      port: 587,
+      secure: false,
+      auth: { user: testAccount.user, pass: testAccount.pass },
+    });
+    console.log('📧 Ethereal test account created:', testAccount.user);
+    console.log('📧 View emails at: https://ethereal.email');
+    return etherealTransporter;
+  }
+
+  // Email worker: Resend API (prod) or Ethereal (dev)
   const emailWorker = new Worker('email', async (job) => {
     const { type, bookingId, userId, email, subject, html, attachments } = job.data;
     const recipient = email || userId;
     console.log(`Processing email job: ${type} for booking ${bookingId} -> ${recipient}`);
 
-    if (!env.RESEND_API_KEY) {
-      throw new Error('RESEND_API_KEY not configured in Railway Variables');
+    if (env.RESEND_API_KEY) {
+      // Production: Resend API
+      const result = await sendViaResendAPI({ to: recipient, subject, html, attachments });
+      console.log(`Email sent via Resend API: ${result.id}`);
+    } else {
+      // Development: Ethereal.email (fake inbox)
+      const transporter = await getEtherealTransporter();
+      const info = await transporter.sendMail({
+        from: '"TicketBook Dev" <dev@ticketbook.local>',
+        to: recipient,
+        subject,
+        html,
+        attachments: attachments?.map(a => ({
+          filename: a.filename,
+          content: a.content,
+        })) || [],
+      });
+      console.log(`📧 Ethereal email sent: ${info.messageId}`);
+      console.log(`📧 Preview URL: ${nodemailer.getTestMessageUrl(info)}`);
     }
-
-    const result = await sendViaResendAPI({ to: recipient, subject, html, attachments });
-    console.log(`Email sent via Resend API: ${result.id}`);
 
     // Log email in database
     try {
