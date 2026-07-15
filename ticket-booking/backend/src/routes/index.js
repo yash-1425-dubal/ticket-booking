@@ -17,6 +17,7 @@ const searchRoutes = require('../modules/search/search.routes');
 const scraperRoutes = require('../modules/scraper/scraper.routes');
 const couponRoutes = require('../modules/coupons/coupon.routes');
 const reviewRoutes = require('../modules/reviews/review.routes');
+const organizerRoutes = require('../modules/organizer/organizer.routes');
 
 const router = Router();
 
@@ -35,6 +36,7 @@ router.use('/api/dashboard', apiLimiter, dashboardRoutes);
 router.use('/api/notifications', apiLimiter, notificationRoutes);
 router.use('/api/admin', apiLimiter, adminRoutes);
 router.use('/api/search', apiLimiter, searchRoutes);
+router.use('/api/organizer', apiLimiter, organizerRoutes);
 router.use('/api/scraper', apiLimiter, scraperRoutes);
 router.use('/api/coupons', apiLimiter, couponRoutes);
 router.use('/api/reviews', apiLimiter, reviewRoutes);

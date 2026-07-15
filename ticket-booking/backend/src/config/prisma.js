@@ -2,15 +2,18 @@ const { PrismaClient } = require('@prisma/client');
 const { PrismaPg } = require('@prisma/adapter-pg');
 const pg = require('pg');
 
-const databaseUrl = process.env.DATABASE_URL || '';
+let databaseUrl = process.env.DATABASE_URL || '';
 
-// Parse SSL mode from DATABASE_URL
-const isExternalConnection = databaseUrl.includes('render.com') || databaseUrl.includes('sslmode=');
-const sslConfig = isExternalConnection ? { rejectUnauthorized: false } : false;
+// Strip sslmode query param — handled via explicit config below
+const isExternalConnection = !databaseUrl.includes('localhost') && !databaseUrl.includes('127.0.0.1') && !databaseUrl.includes('::1');
+if (isExternalConnection) {
+  databaseUrl = databaseUrl.replace(/[\?&]sslmode=[^&]+/, '');
+  databaseUrl = databaseUrl.replace(/[?&]$/, '');
+}
 
 const pool = new pg.Pool({
   connectionString: databaseUrl,
-  ssl: sslConfig,
+  ssl: isExternalConnection ? { rejectUnauthorized: false } : false,
 });
 
 const adapter = new PrismaPg(pool);

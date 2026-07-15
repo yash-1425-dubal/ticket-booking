@@ -3,7 +3,9 @@ const { PrismaPg } = require('@prisma/adapter-pg');
 const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const dbUrl = (process.env.DATABASE_URL || '').replace(/[\?&]sslmode=[^&]+/g, '').replace(/[?&]$/, '');
+const isExternal = dbUrl.includes('render.com');
+const pool = new Pool({ connectionString: dbUrl, ssl: isExternal ? { rejectUnauthorized: false } : false });
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
