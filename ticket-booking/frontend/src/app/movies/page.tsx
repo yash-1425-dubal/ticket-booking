@@ -118,18 +118,18 @@ export default function MoviesPage() {
       const dbMovies = Array.isArray(dbMoviesRes.data) ? dbMoviesRes.data : dbMoviesRes.data?.data || dbMoviesRes.data?.results || [];
 
       if (category === 'MOVIES') {
-        const res = await api.get<{ success: boolean; data: any }>(`/organizer/movies?${params.toString()}`);
+        const res = await api.get<{ success: boolean; data: any }>(`/scraper/movies?${params.toString()}`);
         results = Array.isArray(res.data) ? res.data : res.data?.data || res.data?.results || [];
         results.forEach((m: any) => { m._scraperSource = 'MOVIES'; });
       } else if (category === 'EVENTS') {
-        const res = await api.get<{ success: boolean; data: any }>(`/organizer/events?${params.toString()}`);
+        const res = await api.get<{ success: boolean; data: any }>(`/scraper/events?${params.toString()}`);
         results = Array.isArray(res.data) ? res.data : res.data?.data || res.data?.results || [];
         results.forEach((e: any) => { e._scraperSource = 'EVENTS'; });
       } else {
         // "All" — fetch both movies and events, merge into one list
         const [moviesRes, eventsRes] = await Promise.all([
-          api.get<{ success: boolean; data: any }>(`/organizer/movies?${params.toString()}`),
-          api.get<{ success: boolean; data: any }>(`/organizer/events?${params.toString()}`),
+          api.get<{ success: boolean; data: any }>(`/scraper/movies?${params.toString()}`),
+          api.get<{ success: boolean; data: any }>(`/scraper/events?${params.toString()}`),
         ]);
         const movies = Array.isArray(moviesRes.data) ? moviesRes.data : moviesRes.data?.data || moviesRes.data?.results || [];
         const events = Array.isArray(eventsRes.data) ? eventsRes.data : eventsRes.data?.data || eventsRes.data?.results || [];
@@ -166,7 +166,7 @@ export default function MoviesPage() {
     if (!selectedCity) return;
     setRefreshing(true);
     try {
-      await api.post(`/organizer/refresh-cache?city=${encodeURIComponent(selectedCity)}`);
+      await api.post(`/scraper/refresh-cache?city=${encodeURIComponent(selectedCity)}`);
       // Clear session cache and re-fetch
       const cacheKey = `movies:${category || 'all'}:${selectedCity}`;
       try { sessionStorage.removeItem(cacheKey); } catch {}
