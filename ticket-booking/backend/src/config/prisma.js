@@ -2,7 +2,17 @@ const { PrismaClient } = require('@prisma/client');
 const { PrismaPg } = require('@prisma/adapter-pg');
 const pg = require('pg');
 
-const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+const databaseUrl = process.env.DATABASE_URL || '';
+
+// Parse SSL mode from DATABASE_URL
+const isExternalConnection = databaseUrl.includes('render.com') || databaseUrl.includes('sslmode=');
+const sslConfig = isExternalConnection ? { rejectUnauthorized: false } : false;
+
+const pool = new pg.Pool({
+  connectionString: databaseUrl,
+  ssl: sslConfig,
+});
+
 const adapter = new PrismaPg(pool);
 
 const prisma = new PrismaClient({

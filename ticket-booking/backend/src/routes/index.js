@@ -35,7 +35,7 @@ router.use('/api/dashboard', apiLimiter, dashboardRoutes);
 router.use('/api/notifications', apiLimiter, notificationRoutes);
 router.use('/api/admin', apiLimiter, adminRoutes);
 router.use('/api/search', apiLimiter, searchRoutes);
-router.use('/api/organizer', apiLimiter, scraperRoutes);
+router.use('/api/scraper', apiLimiter, scraperRoutes);
 router.use('/api/coupons', apiLimiter, couponRoutes);
 router.use('/api/reviews', apiLimiter, reviewRoutes);
 
