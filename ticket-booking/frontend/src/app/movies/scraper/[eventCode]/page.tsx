@@ -130,7 +130,7 @@ export default function ScraperMovieDetailPage() {
     setLoading(true);
     try {
       const res = await api.get<{ success: boolean; data: any }>(
-        `/organizer/movie-details?city=${encodeURIComponent(city)}&event_code=${eventCode}`
+        `/scraper/movie-details?city=${encodeURIComponent(city)}&event_code=${eventCode}`
       );
       const data = res.data?.data || res.data;
       if (data && data.status === 'error') {
