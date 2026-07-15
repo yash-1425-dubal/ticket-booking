@@ -24,10 +24,11 @@ async function setupWorkers() {
     let useEthereal = false;
 
     if (env.SMTP_USER && env.SMTP_PASS) {
+      const useSSL = env.SMTP_PORT === '465' || env.SMTP_SECURE === 'true';
       transporter = nodemailer.createTransport({
         host: env.SMTP_HOST,
-        port: env.SMTP_PORT,
-        secure: false,
+        port: parseInt(env.SMTP_PORT, 10) || 587,
+        secure: useSSL,
         connectionTimeout: 10000,
         greetingTimeout: 10000,
         socketTimeout: 15000,
