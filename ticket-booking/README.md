@@ -2,6 +2,13 @@
 
 A full-stack ticket booking platform with real-time seat selection, waitlist management, QR ticket verification, and email notifications. Supports movies, concerts, theater shows, and events with role-based access for customers, organizers, and administrators.
 
+## Live Demo
+
+| Environment | URL |
+|-------------|-----|
+| **Frontend (Vercel)** | [https://ticket-booking-wheat-mu.vercel.app](https://ticket-booking-wheat-mu.vercel.app) |
+| **Backend (Railway)** | Deploy on Railway with backend service root at `ticket-booking/backend` |
+
 ## Tech Stack
 
 | Layer | Technology |
@@ -53,9 +60,9 @@ A full-stack ticket booking platform with real-time seat selection, waitlist man
 - Verification is logged in the `TicketVerification` table for audit.
 
 ### Email Notifications
-- BullMQ-backed background email queue (or direct Nodemailer fallback when Redis is unavailable).
-- Template: booking confirmation, cancellation, waitlist promotion, waitlist expiry, password reset, email verification.
-- Ethereal.email fallback for development when no SMTP is configured.
+- BullMQ-backed background email queue (or direct Resend API fallback when Redis is unavailable).
+- Templates: booking confirmation, cancellation, waitlist promotion, waitlist expiry, password reset, email verification.
+- Ethereal.email fallback for development when no credentials configured.
 
 ### Real-Time Updates
 - Socket.IO rooms: `event:<eventId>` for seat status changes, `user:<userId>` for personal notifications.
@@ -114,7 +121,7 @@ cd ../backend
 cp .env.example .env
 ```
 
-Edit `.env` with your database URL, JWT secrets, and SMTP credentials (see reference table below).
+Edit `.env` with your database URL, JWT secrets, and email credentials (see reference table below).
 
 ### 4. Start infrastructure (PostgreSQL + Redis)
 
@@ -170,10 +177,12 @@ npm run worker:bullmq
 | `JWT_REFRESH_SECRET` | (required) | Secret key for signing refresh tokens |
 | `FRONTEND_URL` | `http://localhost:3000` | Frontend URL (used for CORS and email links) |
 | `REDIS_URL` | `redis://localhost:6379` | Redis connection string |
-| `SMTP_HOST` | `smtp.gmail.com` | SMTP server host |
-| `SMTP_PORT` | `587` | SMTP server port |
-| `SMTP_USER` | (empty) | SMTP authentication username |
-| `SMTP_PASS` | (empty) | SMTP authentication password |
+| `RESEND_API_KEY` | (empty) | Resend API key for email (production) |
+| `RESEND_FROM_EMAIL` | (empty) | Verified sender email in Resend |
+| `SMTP_HOST` | `smtp.gmail.com` | SMTP server host (fallback) |
+| `SMTP_PORT` | `587` | SMTP server port (fallback) |
+| `SMTP_USER` | (empty) | SMTP authentication username (fallback) |
+| `SMTP_PASS` | (empty) | SMTP authentication password (fallback) |
 | `EMAIL_FROM` | `noreply@ticketbooking.com` | From address for outgoing emails |
 | `BULLMQ_JOB_ATTEMPTS` | `3` | Max retry attempts for BullMQ jobs |
 | `BULLMQ_BACKOFF_DELAY_MS` | `5000` | Delay between BullMQ job retries |
@@ -233,53 +242,151 @@ frontend/src/app/
   movies/scraper/[...]/   -- BookMyShow scraper import UI
 ```
 
-## Scripts Reference
+## Key Technical Flows
 
-### Backend
+### Seat Hold & TTL Mechanism
 
-| Script | Command | Description |
-|--------|---------|-------------|
-| `dev` | `nodemon src/server.js` | Start backend with hot-reload |
-| `start` | `node src/server.js` | Start backend in production |
-| `prisma:generate` | `prisma generate` | Generate Prisma client |
-| `prisma:migrate` | `prisma migrate dev` | Run pending migrations |
-| `prisma:studio` | `prisma studio` | Open Prisma Studio GUI |
-| `prisma:seed` | `node prisma/seed.js` | Seed database with demo data |
-| `worker:bullmq` | `node src/queues/workers.js` | Start BullMQ background worker |
-| `test` | `jest --runInBand` | Run tests |
+1. **User selects seats** → clicks "Hold" → `POST /seats/hold`
+2. **Backend validates**: seats exist, are `AVAILABLE`, not held by others
+3. **Atomic update**: seats → `HELD` + `heldBy=userId` + `heldAt=now()` + `version++`
+4. **Redis key**: `seat:hold:{seatId}` = `{userId, expiresAt}` (TTL: 10 min)
+5. **Response**: `{ heldSeats, expiresAt }` → frontend starts countdown
 
-### Frontend
+**Concurrency Prevention**
+- Redis distributed lock: `booking:{eventId}:{userId}` (30s TTL)
+- Optimistic locking: `version` column on Seat -- `UPDATE ... WHERE version = X`
+- Double-check in transaction: `UPDATE seats SET status=BOOKED WHERE status=HELD AND version=X`
 
-| Script | Command | Description |
-|--------|---------|-------------|
-| `dev` | `next dev` | Start dev server on port 3000 |
-| `build` | `next build` | Production build |
-| `start` | `next start` | Start production server |
+**TTL Expiration**
+- Fallback cron (every 30s): releases seats where `heldAt < now() - 10min`
+- Redis key expiry: auto-cleanup if Redis available
+- On expiration: seats → `AVAILABLE`, lock released, frontend alerted via socket
 
-### Docker
+### Waitlist Auto-Assignment Flow
 
-```bash
-# Start all services (PostgreSQL, Redis, backend, frontend)
-docker compose up --build
-
-# Start infrastructure only
-docker compose up -d postgres redis
+**Joining Waitlist**
+```
+User clicks "Join Waitlist" for category
+    ↓
+Create WaitlistEntry: status=WAITING, position=MAX(position)+1
+    ↓
+Return position to user
+    ↓
+Background: send confirmation email (Resend API)
 ```
 
-## Demo Accounts
-
-After seeding, log in with:
-
-| Role | Email | Password |
-|------|-------|----------|
-| Admin | admin@ticketbook.com | admin123 |
-| Organizer | organizer@ticketbook.com | organizer123 |
-| Customer | customer@ticketbook.com | customer123 |
-
-## Docker Deployment
-
-```bash
-docker compose up --build
+**Seat Freed (Cancel or Hold Expiry)**
+```
+Seat becomes AVAILABLE
+    ↓
+promoteWaitlist(eventId, seatId) called
+    ↓
+Find first WAITING entry for seat.category ORDER BY position ASC
+    ↓
+Update entry: status=PROMOTED
+    ↓
+Seat → HELD for that user (15 min offer TTL)
+    ↓
+Notify via: Socket (waitlistPromoted) + Email (Resend) + Notification table
+    ↓
+Queue job: waitlist:offer-expiry (delay=15min) → expireOffer()
 ```
 
-This starts PostgreSQL (port 5433), Redis (6379), backend (4000), and frontend (3000). The Dockerfile.backend uses multi-stage with `prisma migrate deploy` on startup. The Dockerfile.frontend builds to Next.js standalone output.
+**Offer Expiry**
+```
+If user doesn't book within 15 min:
+    ↓
+    Seat → AVAILABLE
+    ↓
+    WaitlistEntry → EXPIRED
+    ↓
+    Notify user (email + socket)
+    ↓
+    Promote next in line (recursive)
+```
+
+### Time-Limited Offer Handling
+
+| Component | Duration | Purpose |
+|-----------|----------|---------|
+| **Seat Hold TTL** | 10 minutes | User selects → holds seats |
+| **Booking Lock** | 30 seconds | Prevents double-booking during payment |
+| **Waitlist Offer TTL** | 15 minutes | Promoted user must book |
+| **Access Token** | 15 minutes | JWT expiry, auto-refresh via refresh token |
+| **Refresh Token** | 7 days | Long-lived, rotates on use |
+| **Cleanup Cron** | Every 30s | Fallback for expired holds |
+
+## Deployment
+
+### Railway (Backend + PostgreSQL + Redis)
+1. New Project → Add PostgreSQL, Redis
+2. Add Backend service → Root: `ticket-booking/backend`
+3. Variables: `DATABASE_URL`, `JWT_SECRET`, `JWT_REFRESH_SECRET`, `FRONTEND_URL`, `REDIS_URL`, `RESEND_API_KEY`, `RESEND_FROM_EMAIL`
+4. Start Command: `npx prisma migrate deploy && node src/server.js`
+
+### Vercel (Frontend)
+1. Import GitHub repo → Root: `ticket-booking/frontend`
+2. Variables: `NEXT_PUBLIC_API_URL=https://your-railway-url/api`, `NEXT_PUBLIC_WS_URL=https://your-railway-url`
+3. Deploy
+
+## Testing Checklist
+
+- [ ] Register/Login → JWT tokens stored
+- [ ] Browse movies → select event → seat map loads
+- [ ] Select seats → Hold → countdown starts (10 min)
+- [ ] Hold expires → seats released → alert shown
+- [ ] Confirm booking → instant QR in response (no 2nd API call)
+- [ ] Cancel booking → instant → waitlist promoted
+- [ ] Join waitlist → instant → promotion email sent
+- [ ] QR scan → `/ticket/:id` shows verified
+
+## Project Structure
+
+```
+ticket-booking/
+├── backend/
+│   ├── prisma/schema.prisma      # DB schema
+│   ├── src/
+│   │   ├── config/               # env, prisma, redis
+│   │   ├── middleware/           # auth, validation, idempotency
+│   │   ├── modules/
+│   │   │   ├── auth/             # JWT, register, login
+│   │   │   ├── bookings/         # booking service/controller
+│   │   │   ├── seats/            # hold, release, cleanup
+│   │   │   ├── waitlist/         # join, promote, expire
+│   │   │   ├── qr/               # QR generate/verify
+│   │   │   └── ...
+│   │   ├── queues/               # BullMQ workers (email, waitlist)
+│   │   ├── sockets/              # Socket.IO real-time
+│   │   ├── utils/                # ApiError, redisLock, etc.
+│   │   ├── app.js                # Express app
+│   │   └── server.js             # Entry point
+│   └── package.json
+├── frontend/
+│   ├── src/
+│   │   ├── app/                  # Next.js App Router pages
+│   │   ├── components/           # SeatMap, UI components
+│   │   ├── lib/                  # api client, auth context, socket
+│   │   └── ...
+│   └── package.json
+└── README.md
+```
+
+## Key Features Implemented
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| JWT Auth (access + refresh) | ✅ | Auto-refresh on 401 |
+| Seat hold with TTL | ✅ | 10 min, Redis + cron fallback |
+| Distributed locking | ✅ | Redis + in-memory fallback |
+| Waitlist with promotion | ✅ | FIFO, 15 min offer window |
+| Instant QR confirmation | ✅ | Returned in booking response |
+| Real-time seat updates | ✅ | Socket.IO |
+| Background email queue | ✅ | BullMQ → Resend API (HTTPS) |
+| Queue dashboard | ✅ | Bull Board at `/admin/queues` |
+| Idempotent bookings | ✅ | Header-based |
+| Audit logging | ✅ | All critical actions |
+
+## License
+
+MIT License - © 2026 Yash Dubal
