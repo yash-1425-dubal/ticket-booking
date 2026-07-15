@@ -1,7 +1,6 @@
 const http = require('http');
 const app = require('./app');
 const env = require('./config/env');
-const prisma = require('./config/prisma');
 const { initSocketServer } = require('./sockets');
 const { initQueues } = require('./queues/queues');
 const { setupWorkers } = require('./queues/workers');
@@ -17,15 +16,9 @@ app.set('io', io);
 
 async function start() {
   try {
-    console.log('[START] Connecting to database...');
-    await prisma.$connect();
-    console.log('[START] Database connected');
-
-    // Start fallback cron for expired seat holds (runs regardless of Redis)
     console.log('[START] Starting fallback cron...');
     startFallbackCron();
 
-    // Initialize queues
     console.log('[START] Initializing queues...');
     initQueues();
 
@@ -44,7 +37,6 @@ async function start() {
 
 process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down...');
-  await prisma.$disconnect();
   server.close(() => process.exit(0));
 });
 
