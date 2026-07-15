@@ -84,10 +84,12 @@ async function setupWorkers() {
       to: Array.isArray(to) ? to.map(e => ({ email: e })) : [{ email: to }],
       subject,
       htmlContent: html,
-      attachment: attachments?.map(a => ({
-        name: a.filename,
-        content: a.content.toString('base64'),
-      })) || [],
+      ...(attachments?.length ? {
+        attachment: attachments.map(a => ({
+          name: a.filename,
+          content: a.content.toString('base64'),
+        })),
+      } : {}),
     };
 
     const response = await axios.post('https://api.brevo.com/v3/smtp/email', payload, {

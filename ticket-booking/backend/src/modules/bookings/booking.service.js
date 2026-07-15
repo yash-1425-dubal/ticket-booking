@@ -35,7 +35,9 @@ async function sendEmail({ to, subject, html, attachments }) {
       to: Array.isArray(to) ? to.map(e => ({ email: e })) : [{ email: to }],
       subject,
       htmlContent: html,
-      attachment: attachments?.map(a => ({ name: a.filename, content: a.content.toString('base64') })) || [],
+      ...(attachments?.length ? {
+        attachment: attachments.map(a => ({ name: a.filename, content: a.content.toString('base64') })),
+      } : {}),
     };
     const response = await axios.post('https://api.brevo.com/v3/smtp/email', payload, {
       headers: { 'api-key': env.BREVO_API_KEY, 'Content-Type': 'application/json' },
@@ -263,6 +265,10 @@ async function createBooking(eventId, seatIds, userId, idempotencyKey) {
           html: emailHtml,
           attachments: serializedAttachments,
         });
+        // Log as QUEUED — worker will process and log as SENT
+        await prisma.emailLog.create({
+          data: { userId, to: user?.email, subject: `Booking Confirmed - ${eventTitle}`, status: 'QUEUED', bookingId: booking.id },
+        });
       } else {
         // Direct send fallback (no Redis) — use 3-tier sender
         await sendEmail({
@@ -273,10 +279,12 @@ async function createBooking(eventId, seatIds, userId, idempotencyKey) {
         });
       }
 
-      // Log email
-      await prisma.emailLog.create({
-        data: { userId, to: user?.email, subject: `Booking Confirmed - ${eventTitle}`, status: 'SENT', bookingId: booking.id },
-      });
+      // Log email — only for direct send (queue path logs inside the if block above)
+      if (!emailQueue) {
+        await prisma.emailLog.create({
+          data: { userId, to: user?.email, subject: `Booking Confirmed - ${eventTitle}`, status: 'SENT', bookingId: booking.id },
+        });
+      }
     } catch (e) {
       console.error('Failed to send booking email:', e?.message);
     }
@@ -473,6 +481,12 @@ ${reason ? `<p><strong>Reason:</strong> ${reason}</p>` : ''}
           subject: `Booking Cancelled - ${eventTitle}`,
           html: emailHtml,
         });
+        // Log as QUEUED — worker will process and log as SENT
+        try {
+          await prisma.emailLog.create({
+            data: { userId, to: booking.user?.email, subject: `Booking Cancelled - ${eventTitle}`, status: 'QUEUED', bookingId },
+          });
+        } catch {}
       } else {
         // Direct send fallback (no Redis) — use 3-tier sender
         await sendEmail({
@@ -480,14 +494,13 @@ ${reason ? `<p><strong>Reason:</strong> ${reason}</p>` : ''}
           subject: `Booking Cancelled - ${eventTitle}`,
           html: emailHtml,
         });
+        // Log as SENT — actually sent
+        try {
+          await prisma.emailLog.create({
+            data: { userId, to: booking.user?.email, subject: `Booking Cancelled - ${eventTitle}`, status: 'SENT', bookingId },
+          });
+        } catch {}
       }
-
-      // Log cancellation email
-      try {
-        await prisma.emailLog.create({
-          data: { userId, to: booking.user?.email, subject: `Booking Cancelled - ${eventTitle}`, status: 'SENT', bookingId },
-        });
-      } catch {}
     } catch (e) {
       console.error('Failed to send cancellation email:', e?.message);
     }
