@@ -4,6 +4,60 @@ const { sendSuccess } = require('../../utils/response');
 const env = require('../../config/env');
 const prisma = require('../../config/prisma');
 
+// Shared 3-tier email sender: Resend API → SMTP → Ethereal fallback
+async function sendDiagnosticEmail({ to, subject, html, attachments }) {
+  if (env.RESEND_API_KEY) {
+    const axios = require('axios');
+    const payload = {
+      from: env.RESEND_FROM_EMAIL || 'TicketBook <onboarding@resend.dev>',
+      to: Array.isArray(to) ? to : [to],
+      subject,
+      html,
+      attachments: attachments?.map(a => ({
+        filename: a.filename,
+        content: a.content.toString('base64'),
+      })) || [],
+    };
+    const response = await axios.post('https://api.resend.com/emails', payload, {
+      headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      timeout: 10000,
+    });
+    console.log(`[TestEmail] Sent via Resend API: ${response.data.id}`);
+    return 'Sent via Resend API';
+  }
+
+  if (env.SMTP_HOST && env.SMTP_USER && env.SMTP_PASS) {
+    const nodemailer = require('nodemailer');
+    const transporter = nodemailer.createTransport({
+      host: env.SMTP_HOST,
+      port: env.SMTP_PORT,
+      secure: env.SMTP_PORT === 465,
+      auth: { user: env.SMTP_USER, pass: env.SMTP_PASS },
+    });
+    const info = await transporter.sendMail({
+      from: env.EMAIL_FROM || `"TicketBook" <${env.SMTP_USER}>`,
+      to,
+      subject,
+      html,
+      attachments,
+    });
+    console.log(`[TestEmail] Sent via SMTP: ${info.messageId}`);
+    return 'Sent via SMTP';
+  }
+
+  const nodemailer = require('nodemailer');
+  const testAccount = await nodemailer.createTestAccount();
+  const transporter = nodemailer.createTransport({
+    host: 'smtp.ethereal.email', port: 587, secure: false,
+    auth: { user: testAccount.user, pass: testAccount.pass },
+  });
+  const info = await transporter.sendMail({
+    from: '"TicketBook Dev" <dev@ticketbook.local>', to, subject, html, attachments,
+  });
+  console.log(`[TestEmail] Sent via Ethereal: ${info.messageId} — ${nodemailer.getTestMessageUrl(info)}`);
+  return `Sent via Ethereal — ${nodemailer.getTestMessageUrl(info)}`;
+}
+
 const getUsers = asyncHandler(async (req, res) => {
   const users = await adminService.getAllUsers(req.query);
   sendSuccess(res, 200, users);
@@ -46,9 +100,9 @@ const testEmail = asyncHandler(async (req, res) => {
   const { to } = req.body;
   if (!to) return sendSuccess(res, 400, null, 'Recipient email is required');
 
-  // Show what's configured
   const configStatus = {
     resendConfigured: !!env.RESEND_API_KEY,
+    resendFrom: env.RESEND_FROM_EMAIL || '(not set)',
     smtpConfigured: !!(env.SMTP_HOST && env.SMTP_USER && env.SMTP_PASS),
     smtpHost: env.SMTP_HOST || '(not set)',
     smtpPort: env.SMTP_PORT,
@@ -56,44 +110,32 @@ const testEmail = asyncHandler(async (req, res) => {
     emailFrom: env.EMAIL_FROM,
   };
 
-  // Try sending using the same 3-tier logic
-  const { sendEmail } = require('../bookings/booking.service');
+  let result, recentLogs = [], redisAvailable = false, queueJobCounts = null;
+
   try {
-    await sendEmail({
+    result = await sendDiagnosticEmail({
       to,
       subject: 'Test Email from TicketBook',
       html: '<h2>Test Email</h2><p>If you receive this, email delivery is working correctly!</p>',
     });
-    configStatus.result = 'Email sent successfully';
   } catch (err) {
-    configStatus.result = `Email send failed: ${err.message}`;
+    result = `Send failed: ${err.message}`;
   }
 
-  // Check recent email logs
   try {
-    const recentLogs = await prisma.emailLog.findMany({
-      orderBy: { createdAt: 'desc' },
-      take: 5,
-    });
-    configStatus.recentLogs = recentLogs;
-  } catch {
-    configStatus.recentLogs = [];
+    recentLogs = await prisma.emailLog.findMany({ orderBy: { createdAt: 'desc' }, take: 5, select: { id: true, to: true, subject: true, status: true, createdAt: true } });
+  } catch (e) {
+    recentLogs = [{ error: e.message }];
   }
 
-  // Check queue status
   try {
     const { getQueue } = require('../../queues/queues');
     const emailQueue = getQueue('email');
-    configStatus.redisAvailable = !!emailQueue;
-    if (emailQueue) {
-      const jobCounts = await emailQueue.getJobCounts();
-      configStatus.queueJobCounts = jobCounts;
-    }
-  } catch {
-    configStatus.redisAvailable = false;
-  }
+    redisAvailable = !!emailQueue;
+    if (emailQueue) queueJobCounts = await emailQueue.getJobCounts();
+  } catch {}
 
-  sendSuccess(res, 200, configStatus);
+  sendSuccess(res, 200, { configStatus, result, recentLogs, redisAvailable, queueJobCounts });
 });
 
 module.exports = { getUsers, updateRole, removeUser, getBookings, getAuditLogs, getConfig, updateConfig, testEmail };
