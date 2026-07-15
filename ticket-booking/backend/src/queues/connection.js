@@ -3,6 +3,8 @@ const env = require('../config/env');
 
 let connection = null;
 let ready = false;
+let readyResolve = null;
+let readyPromise = new Promise((resolve) => { readyResolve = resolve; });
 
 function init() {
   try {
@@ -21,12 +23,20 @@ function init() {
     conn.connect().then(() => {
       ready = true;
       connection = conn;
+      if (readyResolve) readyResolve();
     }).catch(() => {
       console.warn('Queue Redis unavailable, background workers disabled');
+      if (readyResolve) readyResolve();
     });
   } catch {
     console.warn('Queue Redis unavailable, background workers disabled');
+    if (readyResolve) readyResolve();
   }
+}
+
+async function waitForReady(timeout = 5000) {
+  await Promise.race([readyPromise, new Promise(r => setTimeout(r, timeout))]);
+  return ready;
 }
 
 init();
@@ -34,4 +44,5 @@ init();
 module.exports = {
   get client() { return connection; },
   get isReady() { return ready; },
+  waitForReady,
 };

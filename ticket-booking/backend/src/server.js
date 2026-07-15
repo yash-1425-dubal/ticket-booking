@@ -5,6 +5,7 @@ const { initSocketServer } = require('./sockets');
 const { initQueues, getQueue } = require('./queues/queues');
 const { setupWorkers } = require('./queues/workers');
 const { startFallbackCron } = require('./queues/fallbackCron');
+const { waitForReady } = require('./queues/connection');
 
 // Bull Board for queue monitoring
 let bullBoardSetup = false;
@@ -50,6 +51,9 @@ async function start() {
   try {
     console.log('[START] Starting fallback cron...');
     startFallbackCron();
+
+    console.log('[START] Waiting for Redis...');
+    const redisReady = await waitForReady(5000);
 
     console.log('[START] Initializing queues...');
     initQueues();
