@@ -66,32 +66,6 @@ async function setupWorkers() {
       });
     } catch {}
   }, { connection: conn });
-          subject: subject || 'Ticket Booking Update',
-          html: html || `<p>Your booking (${bookingId}) has been ${type}.</p>`,
-          attachments: attachments || [],
-        });
-        previewUrl = nodemailer.getTestMessageUrl(info);
-        console.log(`Ethereal preview URL: ${previewUrl}`);
-        console.log('>>> OPEN THIS URL TO VIEW TEST EMAIL <<<');
-      } catch (e) {
-        console.error('Ethereal fallback failed:', e.message);
-        throw lastError || e;
-      }
-    }
-
-    // Log email in database
-    try {
-      await prisma.emailLog.create({
-        data: {
-          userId,
-          to: recipient,
-          subject: subject || 'Ticket Booking Update',
-          status: sent ? 'SENT' : 'ETHEREAL',
-          bookingId,
-        },
-      });
-    } catch {}
-  }, { connection: conn });
 
   // Waitlist worker (offer expiry)
   const waitlistWorker = new Worker('waitlist', async (job) => {
