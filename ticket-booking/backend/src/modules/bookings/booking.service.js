@@ -284,98 +284,113 @@ async function getBookingById(bookingId, userId) {
 }
 
 async function cancelBooking(bookingId, userId, reason) {
-  const booking = await prisma.booking.findUnique({
-    where: { id: bookingId },
-    include: {
-      bookingSeats: {
-        include: { seat: { select: { seatNumber: true, category: true } } },
-      },
-      event: {
-        include: {
-          movie: { select: { id: true, title: true, venue: { select: { name: true } } } },
-        },
-      },
-      user: { select: { id: true, name: true, email: true } },
-    },
-  });
-
-  if (!booking) throw ApiError.notFound('Booking not found');
-  if (booking.userId !== userId) throw ApiError.forbidden('Not your booking');
-
-  if (booking.status !== 'CONFIRMED') {
-    throw ApiError.badRequest('Booking cannot be cancelled');
+  // Acquire lock to prevent concurrent cancellation
+  const lockKey = `booking-cancel:${bookingId}:${userId}`;
+  const lockToken = await acquireLock(lockKey, 15000);
+  if (!lockToken) {
+    throw ApiError.tooMany('Cancellation in progress, please wait');
   }
 
-  const cancelledBooking = await prisma.$transaction(async (tx) => {
-    // Update booking status
-    const updated = await tx.booking.update({
+  let booking;
+  try {
+    booking = await prisma.booking.findUnique({
       where: { id: bookingId },
-      data: { status: 'CANCELLED' },
-    });
-
-    // Release seats back to available
-    for (const bs of booking.bookingSeats) {
-      await tx.seat.update({
-        where: { id: bs.seatId },
-        data: { status: 'AVAILABLE', version: { increment: 1 } },
-      });
-    }
-
-    return updated;
-  });
-
-  // Broadcast cancellation
-  try {
-    const { getSocketServer } = require('../../sockets');
-    const io = getSocketServer();
-    if (io) {
-      io.to(`event:${booking.eventId}`).emit('bookingCancelled', {
-        eventId: booking.eventId,
-        seatIds: booking.bookingSeats.map((bs) => bs.seatId),
-      });
-    }
-  } catch {}
-
-  // Trigger waitlist promotion for each freed seat
-  try {
-    const { promoteWaitlist } = require('../waitlist/waitlist.service');
-    for (const bs of booking.bookingSeats) {
-      await promoteWaitlist(booking.eventId, bs.seatId);
-    }
-  } catch {}
-
-  // Create cancellation notification for the user
-  try {
-    const seatList = booking.bookingSeats.map((bs) => bs.seat.seatNumber).join(', ');
-    const eventTitle = booking.event?.movie?.title || 'Event';
-    await prisma.notification.create({
-      data: {
-        userId,
-        type: 'BOOKING_CANCELLED',
-        title: 'Booking Cancelled',
-        message: `Your booking for ${eventTitle} (${seatList}) has been cancelled.${reason ? ` Reason: ${reason}` : ''}`,
+      include: {
+        bookingSeats: {
+          include: { seat: { select: { seatNumber: true, category: true } } },
+        },
+        event: {
+          include: {
+            movie: { select: { id: true, title: true, venue: { select: { name: true } } } },
+          },
+        },
+        user: { select: { id: true, name: true, email: true } },
       },
     });
-    const { getSocketServer } = require('../../sockets');
-    const io = getSocketServer();
-    if (io) {
-      io.to(`user:${userId}`).emit('notification', {
-        type: 'BOOKING_CANCELLED',
-        title: 'Booking Cancelled',
-        message: `Your booking for ${eventTitle} has been cancelled.`,
-      });
+
+    if (!booking) throw ApiError.notFound('Booking not found');
+    if (booking.userId !== userId) throw ApiError.forbidden('Not your booking');
+
+    if (booking.status !== 'CONFIRMED') {
+      throw ApiError.badRequest('Booking cannot be cancelled');
     }
-  } catch {}
 
-  // Send cancellation email
-  try {
-    const seatList = booking.bookingSeats.map((bs) => bs.seat.seatNumber).join(', ');
-    const eventTitle = booking.event?.movie?.title || 'Event';
-    const venueName = booking.event?.movie?.venue?.name || '';
-    const totalRefund = Number(booking.totalAmount).toFixed(2);
-    const userName = booking.user?.name || 'there';
+    const cancelledBooking = await prisma.$transaction(async (tx) => {
+      // Update booking status
+      const updated = await tx.booking.update({
+        where: { id: bookingId },
+        data: { status: 'CANCELLED' },
+      });
 
-    const emailHtml = `
+      // Release seats back to available
+      for (const bs of booking.bookingSeats) {
+        await tx.seat.update({
+          where: { id: bs.seatId },
+          data: { status: 'AVAILABLE', version: { increment: 1 } },
+        });
+      }
+
+      return updated;
+    });
+  } finally {
+    // Release lock immediately after transaction
+    await releaseLock(lockKey, lockToken);
+  }
+
+  // Return immediately — run side effects in background
+  setImmediate(async () => {
+    try {
+      // Broadcast cancellation
+      const { getSocketServer } = require('../../sockets');
+      const io = getSocketServer();
+      if (io) {
+        io.to(`event:${booking.eventId}`).emit('bookingCancelled', {
+          eventId: booking.eventId,
+          seatIds: booking.bookingSeats.map((bs) => bs.seatId),
+        });
+      }
+    } catch {}
+
+    // Trigger waitlist promotion for each freed seat
+    try {
+      const { promoteWaitlist } = require('../waitlist/waitlist.service');
+      for (const bs of booking.bookingSeats) {
+        await promoteWaitlist(booking.eventId, bs.seatId);
+      }
+    } catch {}
+
+    // Create cancellation notification for the user
+    try {
+      const seatList = booking.bookingSeats.map((bs) => bs.seat.seatNumber).join(', ');
+      const eventTitle = booking.event?.movie?.title || 'Event';
+      await prisma.notification.create({
+        data: {
+          userId,
+          type: 'BOOKING_CANCELLED',
+          title: 'Booking Cancelled',
+          message: `Your booking for ${eventTitle} (${seatList}) has been cancelled.${reason ? ` Reason: ${reason}` : ''}`,
+        },
+      });
+      const { getSocketServer } = require('../../sockets');
+      const io = getSocketServer();
+      if (io) {
+        io.to(`user:${userId}`).emit('notification', {
+          type: 'BOOKING_CANCELLED',
+          title: 'Booking Cancelled',
+          message: `Your booking for ${eventTitle} has been cancelled.`,
+        });
+      }
+    } catch {}
+
+    // Send cancellation email (non-blocking)
+    try {
+      const seatList = booking.bookingSeats.map((bs) => bs.seat.seatNumber).join(', ');
+      const eventTitle = booking.event?.movie?.title || 'Event';
+      const venueName = booking.event?.movie?.venue?.name || '';
+      const totalRefund = Number(booking.totalAmount).toFixed(2);
+      const userName = booking.user?.name || 'there';
+
+      const emailHtml = `
 <h2>Booking Cancelled</h2>
 <p>Hi ${userName},</p>
 <p>Your booking for <strong>${eventTitle}</strong>${venueName ? ` at ${venueName}` : ''} has been cancelled.</p>
@@ -386,56 +401,57 @@ ${reason ? `<p><strong>Reason:</strong> ${reason}</p>` : ''}
 <hr />
 <p style="color:#666;font-size:12px">This is an automated message from TicketBook.</p>`;
 
-    const mailOptions = {
-      from: env.EMAIL_FROM,
-      to: booking.user?.email,
-      subject: `Booking Cancelled - ${eventTitle}`,
-      html: emailHtml,
-    };
-
-    const { getQueue } = require('../../queues/queues');
-    const emailQueue = getQueue('email');
-    if (emailQueue) {
-      await emailQueue.add('booking-cancellation', {
-        bookingId,
-        userId,
-        email: booking.user?.email,
+      const mailOptions = {
+        from: env.EMAIL_FROM,
+        to: booking.user?.email,
         subject: `Booking Cancelled - ${eventTitle}`,
         html: emailHtml,
-      });
-    } else {
-      const nodemailer = require('nodemailer');
-      const transporter = nodemailer.createTransport({
-        host: env.SMTP_HOST,
-        port: env.SMTP_PORT,
-        secure: false,
-        auth: { user: env.SMTP_USER, pass: env.SMTP_PASS },
-      });
-      await transporter.sendMail(mailOptions);
+      };
+
+      const { getQueue } = require('../../queues/queues');
+      const emailQueue = getQueue('email');
+      if (emailQueue) {
+        await emailQueue.add('booking-cancellation', {
+          bookingId,
+          userId,
+          email: booking.user?.email,
+          subject: `Booking Cancelled - ${eventTitle}`,
+          html: emailHtml,
+        });
+      } else {
+        const nodemailer = require('nodemailer');
+        const transporter = nodemailer.createTransport({
+          host: env.SMTP_HOST,
+          port: env.SMTP_PORT,
+          secure: false,
+          auth: { user: env.SMTP_USER, pass: env.SMTP_PASS },
+        });
+        await transporter.sendMail(mailOptions);
+      }
+
+      // Log cancellation email
+      try {
+        await prisma.emailLog.create({
+          data: { userId, to: booking.user?.email, subject: `Booking Cancelled - ${eventTitle}`, status: 'SENT', bookingId },
+        });
+      } catch {}
+    } catch (e) {
+      console.error('Failed to send cancellation email:', e?.message);
     }
 
-    // Log cancellation email
+    // Audit log for cancellation
     try {
-      await prisma.emailLog.create({
-        data: { userId, to: booking.user?.email, subject: `Booking Cancelled - ${eventTitle}`, status: 'SENT', bookingId },
+      await prisma.auditLog.create({
+        data: {
+          userId,
+          action: 'BOOKING_CANCELLED',
+          entityType: 'Booking',
+          entityId: bookingId,
+          metadata: { reason, totalRefund: Number(booking.totalAmount) },
+        },
       });
     } catch {}
-  } catch (e) {
-    console.error('Failed to send cancellation email:', e?.message);
-  }
-
-  // Audit log for cancellation
-  try {
-    await prisma.auditLog.create({
-      data: {
-        userId,
-        action: 'BOOKING_CANCELLED',
-        entityType: 'Booking',
-        entityId: bookingId,
-        metadata: { reason, totalRefund: Number(booking.totalAmount) },
-      },
-    });
-  } catch {}
+  });
 
   return cancelledBooking;
 }
