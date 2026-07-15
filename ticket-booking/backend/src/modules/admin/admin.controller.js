@@ -137,7 +137,7 @@ const testEmail = asyncHandler(async (req, res) => {
       html: '<h2>Test Email</h2><p>If you receive this, email delivery is working correctly!</p>',
     });
   } catch (err) {
-    result = `Send failed: ${err.message}`;
+    result = `Send failed: ${err.message}${err.response ? ' - ' + JSON.stringify(err.response.data) : ''}`;
   }
 
   try {
