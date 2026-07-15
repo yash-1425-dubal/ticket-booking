@@ -9,6 +9,7 @@ interface RequestOptions {
 
 class ApiClient {
   private token: string | null = null;
+  private refreshPromise: Promise<string | null> | null = null;
 
   constructor() {
     if (typeof window !== 'undefined') {
@@ -29,6 +30,35 @@ class ApiClient {
     return this.token;
   }
 
+  private async refreshAccessToken(): Promise<string | null> {
+    if (this.refreshPromise) return this.refreshPromise;
+
+    this.refreshPromise = (async () => {
+      const refreshToken = localStorage.getItem('refreshToken');
+      if (!refreshToken) return null;
+
+      try {
+        const response = await fetch(`${API_URL}/auth/refresh`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refreshToken }),
+        });
+        const data = await response.json();
+        if (data.success && data.data.accessToken) {
+          this.setToken(data.data.accessToken);
+          localStorage.setItem('refreshToken', data.data.refreshToken);
+          return data.data.accessToken;
+        }
+      } catch {}
+      this.logout();
+      return null;
+    })();
+
+    const result = await this.refreshPromise;
+    this.refreshPromise = null;
+    return result;
+  }
+
   private async request<T>(endpoint: string, options: RequestOptions = {}): Promise<T> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -43,11 +73,24 @@ class ApiClient {
       headers['Idempotency-Key'] = options.idempotencyKey;
     }
 
-    const response = await fetch(`${API_URL}${endpoint}`, {
+    let response = await fetch(`${API_URL}${endpoint}`, {
       method: options.method || 'GET',
       headers,
       body: options.body ? JSON.stringify(options.body) : undefined,
     });
+
+    // Auto-refresh on 401
+    if (response.status === 401 && endpoint !== '/auth/refresh' && endpoint !== '/auth/login') {
+      const newToken = await this.refreshAccessToken();
+      if (newToken) {
+        headers['Authorization'] = `Bearer ${newToken}`;
+        response = await fetch(`${API_URL}${endpoint}`, {
+          method: options.method || 'GET',
+          headers,
+          body: options.body ? JSON.stringify(options.body) : undefined,
+        });
+      }
+    }
 
     const data = await response.json();
 
