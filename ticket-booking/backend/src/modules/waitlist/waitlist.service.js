@@ -1,62 +1,28 @@
 const prisma = require('../../config/prisma');
 const ApiError = require('../../utils/ApiError');
 const env = require('../../config/env');
-const nodemailer = require('nodemailer');
+const axios = require('axios');
 
 const OFFER_TTL = env.WAITLIST_OFFER_TTL_MINUTES * 60 * 1000;
 
-async function sendEmailInline({ to, subject, html, userId, type }) {
-  try {
-    let transporter;
-    let useEthereal = false;
-    let previewUrl = null;
+async function sendViaResendAPI({ to, subject, html }) {
+  const apiKey = env.RESEND_API_KEY;
+  if (!apiKey) throw new Error('RESEND_API_KEY not set');
 
-    if (env.SMTP_USER && env.SMTP_PASS) {
-      transporter = nodemailer.createTransport({
-        host: env.SMTP_HOST,
-        port: env.SMTP_PORT,
-        secure: false,
-        auth: { user: env.SMTP_USER, pass: env.SMTP_PASS },
-      });
-    } else {
-      useEthereal = true;
-      const testAccount = await nodemailer.createTestAccount();
-      transporter = nodemailer.createTransport({
-        host: 'smtp.ethereal.email',
-        port: 587,
-        secure: false,
-        auth: { user: testAccount.user, pass: testAccount.pass },
-      });
-    }
+  const payload = {
+    from: env.RESEND_FROM_EMAIL || 'TicketBook <onboarding@resend.dev>',
+    to: Array.isArray(to) ? to : [to],
+    subject,
+    html,
+  };
 
-    const info = await transporter.sendMail({
-      from: env.EMAIL_FROM || 'noreply@ticketbooking.com',
-      to,
-      subject,
-      html,
-    });
-
-    if (useEthereal) {
-      previewUrl = nodemailer.getTestMessageUrl(info);
-      console.log(`Email preview: ${previewUrl}`);
-    } else {
-      console.log(`Email sent: ${info.messageId}`);
-    }
-
-    // Log email in database
-    try {
-      await prisma.emailLog.create({
-        data: {
-          userId: userId || '',
-          to,
-          subject: subject || '',
-          status: 'SENT',
-        },
-      });
-    } catch {}
-  } catch (err) {
-    console.error('Failed to send inline email:', err.message);
-  }
+  await axios.post('https://api.resend.com/emails', payload, {
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    timeout: 10000,
+  });
 }
 
 async function trySendEmail(jobData) {
@@ -68,13 +34,11 @@ async function trySendEmail(jobData) {
       return;
     } catch {}
   }
-  // Fallback: send inline if queue unavailable
-  await sendEmailInline({
+  // Fallback: direct Resend API call
+  await sendViaResendAPI({
     to: jobData.email,
     subject: jobData.subject,
     html: jobData.html,
-    userId: jobData.userId,
-    type: jobData.type,
   });
 }
 
