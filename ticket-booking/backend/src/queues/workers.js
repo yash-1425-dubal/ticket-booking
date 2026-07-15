@@ -1,7 +1,6 @@
 const { Worker } = require('bullmq');
 const connection = require('./connection');
 const axios = require('axios');
-const nodemailer = require('nodemailer');
 const prisma = require('../config/prisma');
 const env = require('../config/env');
 const { releaseExpiredHolds } = require('../modules/seats/seat.service');
@@ -41,43 +40,32 @@ async function setupWorkers() {
     return response.data;
   }
 
-  // Email worker: Resend API → Ethereal (fallback for testing)
+  // Email worker: Resend API only
   const emailWorker = new Worker('email', async (job) => {
     const { type, bookingId, userId, email, subject, html, attachments } = job.data;
     const recipient = email || userId;
     console.log(`Processing email job: ${type} for booking ${bookingId} -> ${recipient}`);
 
-    let sent = false;
-    let messageId = null;
-    let previewUrl = null;
-    let lastError = null;
-
-    // 1. Try Resend API (HTTPS, never blocked, great DX)
-    if (env.RESEND_API_KEY) {
-      try {
-        const result = await sendViaResendAPI({ to: recipient, subject, html, attachments });
-        sent = true;
-        messageId = result.id || `resend-${Date.now()}`;
-        console.log(`Email sent via Resend API: ${messageId}`);
-      } catch (err) {
-        lastError = err;
-        console.warn('Resend API failed:', err.message);
-      }
+    if (!env.RESEND_API_KEY) {
+      throw new Error('RESEND_API_KEY not configured in Railway Variables');
     }
 
-    // 2. Final fallback: Ethereal (test emails only)
-    if (!sent) {
-      try {
-        const testAccount = await nodemailer.createTestAccount();
-        const transporter = nodemailer.createTransport({
-          host: 'smtp.ethereal.email',
-          port: 587,
-          secure: false,
-          auth: { user: testAccount.user, pass: testAccount.pass },
-        });
-        const info = await transporter.sendMail({
-          from: env.EMAIL_FROM || 'TicketBook <onboarding@resend.dev>',
+    const result = await sendViaResendAPI({ to: recipient, subject, html, attachments });
+    console.log(`Email sent via Resend API: ${result.id}`);
+
+    // Log email in database
+    try {
+      await prisma.emailLog.create({
+        data: {
+          userId,
           to: recipient,
+          subject: subject || 'Ticket Booking Update',
+          status: 'SENT',
+          bookingId,
+        },
+      });
+    } catch {}
+  }, { connection: conn });
           subject: subject || 'Ticket Booking Update',
           html: html || `<p>Your booking (${bookingId}) has been ${type}.</p>`,
           attachments: attachments || [],
