@@ -28,6 +28,9 @@ async function setupWorkers() {
         host: env.SMTP_HOST,
         port: env.SMTP_PORT,
         secure: false,
+        connectionTimeout: 10000,
+        greetingTimeout: 10000,
+        socketTimeout: 15000,
         auth: { user: env.SMTP_USER, pass: env.SMTP_PASS },
       });
     } else {
@@ -40,6 +43,26 @@ async function setupWorkers() {
         auth: { user: testAccount.user, pass: testAccount.pass },
       });
       console.log(`Using Ethereal email: ${testAccount.user}`);
+    }
+
+    // Verify connection first
+    try {
+      await transporter.verify();
+      console.log('SMTP connection verified');
+    } catch (verifyErr) {
+      console.error('SMTP verify failed:', verifyErr.message);
+      // Fall back to Ethereal
+      if (!useEthereal) {
+        console.log('Falling back to Ethereal...');
+        const testAccount = await nodemailer.createTestAccount();
+        transporter = nodemailer.createTransport({
+          host: 'smtp.ethereal.email',
+          port: 587,
+          secure: false,
+          auth: { user: testAccount.user, pass: testAccount.pass },
+        });
+        useEthereal = true;
+      }
     }
 
     const info = await transporter.sendMail({
