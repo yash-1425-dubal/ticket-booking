@@ -15,6 +15,32 @@ async function setupWorkers() {
 
   const conn = connection.client;
 
+  // Resend API sender (HTTPS, never blocked, 3k/month free)
+  async function sendViaResendAPI({ to, subject, html, attachments }) {
+    const apiKey = env.RESEND_API_KEY;
+    if (!apiKey) throw new Error('RESEND_API_KEY not set');
+
+    const payload = {
+      from: env.RESEND_FROM_EMAIL || env.EMAIL_FROM || 'TicketBook <onboarding@resend.dev>',
+      to: Array.isArray(to) ? to : [to],
+      subject,
+      html,
+      attachments: attachments?.map(a => ({
+        filename: a.filename,
+        content: a.content.toString('base64'),
+      })) || [],
+    };
+
+    const response = await axios.post('https://api.resend.com/emails', payload, {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      timeout: 10000,
+    });
+    return response.data;
+  }
+
   // SendGrid Web API sender (uses HTTPS, never blocked)
   async function sendViaSendGridAPI({ to, subject, html, attachments }) {
     const apiKey = env.SENDGRID_API_KEY;
@@ -45,7 +71,7 @@ async function setupWorkers() {
     return response.data;
   }
 
-  // Email worker: tries SendGrid API → SMTP (SendGrid or Gmail) → Ethereal
+  // Email worker: tries Resend → SendGrid API → SMTP → Ethereal
   const emailWorker = new Worker('email', async (job) => {
     const { type, bookingId, userId, email, subject, html, attachments } = job.data;
     const recipient = email || userId;
@@ -56,8 +82,21 @@ async function setupWorkers() {
     let previewUrl = null;
     let lastError = null;
 
-    // 1. Try SendGrid Web API (HTTPS, never blocked)
-    if (env.SENDGRID_API_KEY) {
+    // 1. Try Resend API (best: https, generous free tier, great DX)
+    if (env.RESEND_API_KEY) {
+      try {
+        const result = await sendViaResendAPI({ to: recipient, subject, html, attachments });
+        sent = true;
+        messageId = result.id || `resend-${Date.now()}`;
+        console.log(`Email sent via Resend API: ${messageId}`);
+      } catch (err) {
+        lastError = err;
+        console.warn('Resend API failed:', err.message);
+      }
+    }
+
+    // 2. Try SendGrid Web API (HTTPS, never blocked)
+    if (!sent && env.SENDGRID_API_KEY) {
       try {
         await sendViaSendGridAPI({ to: recipient, subject, html, attachments });
         sent = true;
@@ -69,7 +108,7 @@ async function setupWorkers() {
       }
     }
 
-    // 2. Try SMTP (SendGrid SMTP or Gmail)
+    // 3. Try SMTP (SendGrid SMTP or Gmail)
     if (!sent && (env.SMTP_USER && env.SMTP_PASS)) {
       let transporter;
       let useEthereal = false;
@@ -141,7 +180,7 @@ async function setupWorkers() {
       }
     }
 
-    // 3. Final Ethereal if nothing worked
+    // 4. Final Ethereal if nothing worked
     if (!sent) {
       try {
         const testAccount = await nodemailer.createTestAccount();
